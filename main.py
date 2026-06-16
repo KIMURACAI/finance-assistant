@@ -67,6 +67,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 存储后台任务引用，防止被垃圾回收
+_background_tasks: set = set()
+
 
 # ─── 微信公众号回调 ──────────────────────────────────
 @app.api_route("/wechat/callback", methods=["GET", "POST"])
@@ -104,7 +107,9 @@ async def wechat_callback(request: Request):
 
     if msg_type == "text" and content and from_user:
         import asyncio
-        asyncio.create_task(handle_wechat_message(from_user, content))
+        task = asyncio.create_task(handle_wechat_message(from_user, content))
+        task.add_done_callback(_background_tasks.discard)
+        _background_tasks.add(task)
 
     return PlainTextResponse("")
 
