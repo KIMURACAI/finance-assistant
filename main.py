@@ -15,7 +15,7 @@ from loguru import logger
 import uvicorn
 
 from config import settings
-from database.db import init_db, get_or_create_user, add_chat
+from database.db import init_db
 from handlers.message_handler import handle_user_message, push_daily_briefing
 from scheduler.daily_task import start_scheduler, stop_scheduler
 from pusher.wxpusher_client import send_text as serverchan_send
@@ -85,44 +85,47 @@ async def wechat_callback(request: Request):
         return PlainTextResponse("invalid")
 
     # POST = 用户发消息
+    # 微信 POST 也带签名，验证一下
+    params = dict(request.query_params)
+    sig = params.get("signature", "")
+    ts = params.get("timestamp", "")
+    nonce = params.get("nonce", "")
+    if not await verify_signature(sig, ts, nonce):
+        logger.warning("微信消息签名验证失败")
+        return PlainTextResponse("invalid signature")
+
     body = await request.body()
     msg = parse_message(body)
-    logger.info(f"收到微信消息: {msg}")
+    logger.info(f"收到微信消息: {msg.get('MsgType')} from {msg.get('FromUserName', '')[:10]}")
 
     msg_type = msg.get("MsgType", "")
     content = msg.get("Content", "").strip()
     from_user = msg.get("FromUserName", "")
 
     if msg_type == "text" and content and from_user:
-        # 异步处理用户消息
         import asyncio
-        asyncio.ensure_future(handle_wechat_message(from_user, content))
+        asyncio.create_task(handle_wechat_message(from_user, content))
 
-    # 微信要求 5 秒内返回
     return PlainTextResponse("")
 
 
 async def handle_wechat_message(openid: str, content: str):
     """处理微信用户消息并回复"""
     try:
-        # 用 openid 作为用户标识
-        user = await get_or_create_user(openid, name="微信用户")
-        user_id = user.id
+        logger.info(f"处理消息 [{openid[:10]}]: {content[:30]}")
 
-        # 保存用户消息
-        await add_chat(user_id, "user", content, msg_type="text")
-
-        # 调用 handle_user_message（它内部会调 AI + 回复）
+        # 直接调用 handle_user_message（它负责 AI + 存储）
         from handlers.message_handler import handle_user_message as handle_msg
         reply = await handle_msg(openid, content)
 
-        # 通过客服消息回复（直接在公众号对话里显示）
+        # 通过客服消息回复
         if reply:
-            await send_customer_message(openid, reply)
+            ok = await send_customer_message(openid, reply)
+            logger.info(f"回复发送{'成功' if ok else '失败'}")
     except Exception as e:
         logger.error(f"处理微信消息异常: {e}")
         try:
-            await send_customer_message(openid, "抱歉，我暂时无法处理，请稍后再试。")
+            await send_customer_message(openid, f"抱歉，处理出错：{str(e)[:50]}")
         except:
             pass
 
