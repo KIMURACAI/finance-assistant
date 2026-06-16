@@ -221,13 +221,15 @@ def clean_commands(text: str) -> str:
 
 def _get_fallback_reply(user_message: str) -> str:
     """Non-AI fallback when DeepSeek is unreachable."""
-    msg = user_message.lower()
+    msg = user_message
     if any(kw in msg for kw in ["添加", "买入", "入仓"]):
         return "请按格式发送：添加持仓 600519 贵州茅台"
     if any(kw in msg for kw in ["删除", "移除", "去掉"]):
         return "请按格式发送：删除 600519"
     if any(kw in msg for kw in ["持仓", "我的", "列表"]):
         return "查看持仓需要联网，请稍后再试。"
+    if any(kw in msg for kw in ["你好", "hi", "hello", "在吗", "在不在"]):
+        return "你好！我是你的金融助手。你可以说「添加持仓 600519」来添加股票，或者说「我的持仓」查看列表。"
     if any(kw in msg for kw in ["早", "简报", "行情"]):
-        return "DeepSeek 暂时无法连接，请稍后再试。"
-    return f"收到：{user_message[:80]}"
+        return "正在加载行情数据，请稍后再试。"
+    return f"你好！目前AI暂时繁忙，你可以试试：\n- 添加持仓 600519 贵州茅台\n- 我的持仓有哪些"

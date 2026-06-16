@@ -75,7 +75,7 @@ async def wechat_callback(request: Request):
         try:
             reply = await asyncio.wait_for(
                 handle_user_message(from_user, content),
-                timeout=4.0,
+                timeout=4.5,
             )
             if reply:
                 return PlainTextResponse(
