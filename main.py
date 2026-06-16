@@ -1,7 +1,8 @@
 """金融资讯助手 - FastAPI 入口
-基于 DeepSeek + WxPusher 的个性化金融资讯推送服务
+基于 DeepSeek + Server酱 的个性化金融资讯推送服务
 """
 
+import os
 import sys
 from contextlib import asynccontextmanager
 
@@ -136,10 +137,11 @@ async def health():
 
 # ─── 入口 ───────────────────────────────────────────────
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", settings.PORT))
     uvicorn.run(
         "main:app",
         host=settings.HOST,
-        port=settings.PORT,
+        port=port,
         reload=False,
         log_level="info",
     )

@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # ─── Web 服务 ───────────────────────────────────────
     HOST: str = "0.0.0.0"
-    PORT: int = 8000
+    PORT: int = 8000  # Railway 会通过环境变量 PORT 覆盖此值
 
     class Config:
         env_file = ".env"
