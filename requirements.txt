@@ -1,20 +1,10 @@
-# Web框架
-fastapi
+fastapi>=0.100.0
 uvicorn[standard]
-
-# 定时任务
 apscheduler
-
-# 数据库
-sqlalchemy
+sqlalchemy[asyncio]
 aiosqlite
-
-# HTTP请求
 httpx
-aiohttp
-
-# 工具
+loguru
 pydantic
 pydantic-settings
 python-dateutil
-loguru

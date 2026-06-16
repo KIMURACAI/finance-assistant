@@ -1,13 +1,10 @@
-"""金融资讯助手 - FastAPI 入口
-微信公众号测试号 + DeepSeek 的个性化金融资讯推送
+"""Finance Assistant - FastAPI entry point.
+WeChat Official Account + DeepSeek AI + ServerChan push.
 """
 
 import os
 import sys
-import hashlib
-import time
 from contextlib import asynccontextmanager
-from xml.etree import ElementTree as ET
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
@@ -16,13 +13,10 @@ import uvicorn
 
 from config import settings
 from database.db import init_db
+from core import close_client
 from handlers.message_handler import handle_user_message, push_daily_briefing
 from scheduler.daily_task import start_scheduler, stop_scheduler
-from pusher.wxpusher_client import send_text as serverchan_send
-from wechat.official_account import (
-    verify_signature, parse_message, build_text_reply,
-    send_customer_message,
-)
+from wechat.official_account import verify_signature, parse_message, send_customer_message
 
 
 def setup_logger():
@@ -38,154 +32,86 @@ def setup_logger():
         lambda msg: sys.stdout.buffer.write(msg.encode("utf-8", errors="replace")),
         level="INFO",
         colorize=False,
-        format="<level>{level}</level> | {message}",
+        format="{message}",
     )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logger()
-    logger.info("正在初始化...")
-    if not settings.DEEPSEEK_API_KEY or settings.DEEPSEEK_API_KEY == "sk-your-deepseek-api-key-here":
-        logger.warning("DeepSeek API Key 未配置")
-    if not settings.WECHAT_APP_ID:
-        logger.warning("微信公众号 appID 未配置")
+    logger.info("Starting...")
     await init_db()
     start_scheduler()
-    logger.info("金融资讯助手启动成功！")
-    logger.info(f"早间简报: {settings.PUSH_TIME_MORNING}")
-    logger.info(f"收盘简报: {settings.PUSH_TIME_EVENING}")
+    logger.info("Ready - DeepSeek:{} WeChat:{} ServerChan:{}".format(
+        bool(settings.DEEPSEEK_API_KEY),
+        bool(settings.WECHAT_APP_ID),
+        bool(settings.SERVERCHAN_SENDKEY),
+    ))
     yield
     stop_scheduler()
-    logger.info("服务已关闭")
+    await close_client()
+    logger.info("Shutdown.")
 
 
-app = FastAPI(
-    title="金融资讯助手",
-    description="微信公众号 + DeepSeek 个性化金融资讯",
-    version="1.0.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="Finance Assistant", version="2.0.0", lifespan=lifespan)
 
-# 存储后台任务引用，防止被垃圾回收
-_background_tasks: set = set()
+# Background task references
+_bg_tasks: set = set()
 
 
-# ─── 微信公众号回调 ──────────────────────────────────
+# ─── WeChat Callback ─────────────────────────────────
 @app.api_route("/wechat/callback", methods=["GET", "POST"])
 async def wechat_callback(request: Request):
-    """微信公众号消息回调"""
     if request.method == "GET":
-        # 验证服务器地址
-        params = dict(request.query_params)
-        sig = params.get("signature", "")
-        ts = params.get("timestamp", "")
-        nonce = params.get("nonce", "")
-        echostr = params.get("echostr", "")
-
-        if await verify_signature(sig, ts, nonce):
-            return PlainTextResponse(echostr)
+        p = dict(request.query_params)
+        if await verify_signature(p.get("signature", ""), p.get("timestamp", ""), p.get("nonce", "")):
+            return PlainTextResponse(p.get("echostr", ""))
         return PlainTextResponse("invalid")
 
-    # POST = 用户发消息
-    # 微信 POST 也带签名，验证一下
-    params = dict(request.query_params)
-    sig = params.get("signature", "")
-    ts = params.get("timestamp", "")
-    nonce = params.get("nonce", "")
-    if not await verify_signature(sig, ts, nonce):
-        logger.warning("微信消息签名验证失败")
-        return PlainTextResponse("invalid signature")
+    # POST: Verify + process
+    p = dict(request.query_params)
+    if not await verify_signature(p.get("signature", ""), p.get("timestamp", ""), p.get("nonce", "")):
+        return PlainTextResponse("invalid")
 
     body = await request.body()
     msg = parse_message(body)
-    logger.info(f"收到微信消息: {msg.get('MsgType')} from {msg.get('FromUserName', '')[:10]}")
-
-    msg_type = msg.get("MsgType", "")
-    content = msg.get("Content", "").strip()
     from_user = msg.get("FromUserName", "")
+    content = msg.get("Content", "").strip()
+    msg_type = msg.get("MsgType", "")
 
     if msg_type == "text" and content and from_user:
         import asyncio
-        task = asyncio.create_task(handle_wechat_message(from_user, content))
-        task.add_done_callback(_background_tasks.discard)
-        _background_tasks.add(task)
+        task = asyncio.create_task(_reply_wechat(from_user, content))
+        task.add_done_callback(_bg_tasks.discard)
+        _bg_tasks.add(task)
 
     return PlainTextResponse("")
 
 
-async def handle_wechat_message(openid: str, content: str):
-    """处理微信用户消息并回复"""
+async def _reply_wechat(openid: str, content: str):
+    """Process WeChat message and send reply."""
     try:
-        logger.info(f"处理消息 [{openid[:10]}]: {content[:30]}")
-
-        # 直接调用 handle_user_message（它负责 AI + 存储）
-        from handlers.message_handler import handle_user_message as handle_msg
-        reply = await handle_msg(openid, content)
-
-        # 通过客服消息回复
+        reply = await handle_user_message(openid, content)
         if reply:
-            ok = await send_customer_message(openid, reply)
-            logger.info(f"回复发送{'成功' if ok else '失败'}")
+            await send_customer_message(openid, reply)
     except Exception as e:
-        logger.error(f"处理微信消息异常: {e}")
+        logger.error(f"WeChat handler error: {e}")
         try:
-            await send_customer_message(openid, f"抱歉，处理出错：{str(e)[:50]}")
-        except:
+            await send_customer_message(openid, "系统繁忙，请稍后再试。")
+        except Exception:
             pass
 
 
-# ─── WxPusher 回调（保留）──────────────────────────────
-@app.api_route("/wxpusher/callback", methods=["GET", "POST"])
-async def wxpusher_callback(request: Request):
-    if request.method == "GET":
-        return PlainTextResponse("ok")
-    try:
-        body = await request.json()
-        data = body.get("data", {})
-        uid = data.get("uid", "")
-        content = data.get("content", "")
-        if uid and content:
-            import asyncio
-            asyncio.ensure_future(handle_user_message(uid, content))
-    except Exception as e:
-        logger.warning(f"WxPusher 回调异常: {e}")
-    return PlainTextResponse("ok")
-
-
-# ─── 手动推送 ──────────────────────────────────────────
-@app.post("/push/now/{uid}")
-async def manual_push(uid: str = ""):
-    from handlers.message_handler import push_daily_briefing
-    await push_daily_briefing(uid or "default", "evening")
-    return {"status": "ok"}
-
-
-@app.post("/push/morning/{uid}")
-async def manual_morning(uid: str = ""):
-    from handlers.message_handler import push_daily_briefing
-    await push_daily_briefing(uid or "default", "morning")
-    return {"status": "ok"}
-
-
-# ─── 健康检查 ──────────────────────────────────────────
+# ─── Health ──────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {
-        "status": "running",
-        "deepseek_ok": bool(settings.DEEPSEEK_API_KEY),
-        "wechat_ok": bool(settings.WECHAT_APP_ID),
-        "morning_push": settings.PUSH_TIME_MORNING,
-        "evening_push": settings.PUSH_TIME_EVENING,
+        "status": "ok",
+        "deepseek": bool(settings.DEEPSEEK_API_KEY),
+        "wechat": bool(settings.WECHAT_APP_ID),
     }
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", settings.PORT))
-    uvicorn.run(
-        "main:app",
-        host=settings.HOST,
-        port=port,
-        reload=False,
-        log_level="info",
-    )
+    uvicorn.run("main:app", host=settings.HOST, port=port, log_level="info")
