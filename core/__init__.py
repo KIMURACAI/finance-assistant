@@ -51,7 +51,8 @@ def retry(max_retries: int = 3, base_delay: float = 0.5, backoff: float = 2.0):
             for attempt in range(max_retries):
                 try:
                     return await func(*args, **kwargs)
-                except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+                except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError,
+                        httpx.HTTPStatusError) as e:
                     last_error = e
                     if attempt < max_retries - 1:
                         delay = base_delay * (backoff ** attempt)

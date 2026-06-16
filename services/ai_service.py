@@ -1,8 +1,10 @@
 """Optimized DeepSeek AI service with caching, compression, token management."""
 
+import asyncio
 import json
 import hashlib
 import time
+import re
 from typing import Optional
 
 from loguru import logger
@@ -85,7 +87,6 @@ def _build_system_prompt(positions: list[dict], preferences: dict) -> str:
     return prompt
 
 
-@retry(max_retries=2, base_delay=1.0)
 async def chat(
     user_message: str,
     positions: list[dict],
@@ -93,16 +94,13 @@ async def chat(
     chat_history: list[dict],
 ) -> str:
     """AI chat with caching + prompt compression."""
-    # Build cache key
     pos_hash = hashlib.md5(str(positions).encode()).hexdigest()[:8]
     history_tail = str(chat_history[-4:]) if chat_history else ""
 
-    # Check semantic cache for simple queries (non-command)
     if len(user_message) < 50 and not any(kw in user_message for kw in ["添加", "删除", "持仓"]):
         cache_key = _make_cache_key(user_message, pos_hash, "")
         cached = _get_cached(cache_key)
         if cached:
-            logger.info(f"AI cache hit: {user_message[:20]}")
             return cached
 
     system_prompt = _build_system_prompt(positions, preferences)
@@ -120,24 +118,26 @@ async def chat(
     }
 
     client = get_client()
-    try:
-        resp = await client.post(
-            API_URL,
-            headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
-            json=payload,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
+    for attempt in range(2):  # Try twice
+        try:
+            resp = await client.post(
+                API_URL,
+                headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
+                json=payload,
+                timeout=httpx.Timeout(25.0, connect=20.0),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            if len(user_message) < 50 and len(content) < 300:
+                _set_cache(_make_cache_key(user_message, pos_hash, ""), content)
+            return content
+        except Exception as e:
+            logger.warning(f"AI attempt {attempt+1} failed: {e}")
+            if attempt == 0:
+                await asyncio.sleep(1.5)
 
-        # Cache simple responses
-        if len(user_message) < 50 and len(content) < 300:
-            _set_cache(_make_cache_key(user_message, pos_hash, ""), content)
-
-        return content
-    except Exception as e:
-        logger.error(f"AI API error: {e}")
-        return "暂时无法处理，请稍后再试。"
+    return _get_fallback_reply(user_message)
 
 
 @retry(max_retries=2, base_delay=1.0)
@@ -216,5 +216,18 @@ def extract_commands(text: str) -> list[dict]:
 
 def clean_commands(text: str) -> str:
     """Remove JSON blocks from text."""
-    import re
     return re.sub(r'```json\s*.*?\s*```', '', text, flags=re.DOTALL).strip()
+
+
+def _get_fallback_reply(user_message: str) -> str:
+    """Non-AI fallback when DeepSeek is unreachable."""
+    msg = user_message.lower()
+    if any(kw in msg for kw in ["添加", "买入", "入仓"]):
+        return "请按格式发送：添加持仓 600519 贵州茅台"
+    if any(kw in msg for kw in ["删除", "移除", "去掉"]):
+        return "请按格式发送：删除 600519"
+    if any(kw in msg for kw in ["持仓", "我的", "列表"]):
+        return "查看持仓需要联网，请稍后再试。"
+    if any(kw in msg for kw in ["早", "简报", "行情"]):
+        return "DeepSeek 暂时无法连接，请稍后再试。"
+    return f"收到：{user_message[:80]}"
