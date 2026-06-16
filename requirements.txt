@@ -1,0 +1,20 @@
+# Web框架
+fastapi
+uvicorn[standard]
+
+# 定时任务
+apscheduler
+
+# 数据库
+sqlalchemy
+aiosqlite
+
+# HTTP请求
+httpx
+aiohttp
+
+# 工具
+pydantic
+pydantic-settings
+python-dateutil
+loguru
