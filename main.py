@@ -91,15 +91,20 @@ async def wechat_callback(request: Request):
 async def _reply_wechat(openid: str, content: str):
     """Process WeChat message and send reply."""
     try:
-        reply = await handle_user_message(openid, content)
-        if reply:
-            await send_customer_message(openid, reply)
+        # DIAGNOSTIC: First just echo back to verify callback chain works
+        reply = f"收到: {content[:50]}"
+        ok = await send_customer_message(openid, reply)
+        logger.info(f"Echo reply to {openid[:10]}: {'sent' if ok else 'failed'}")
+
+        # Now try the real handler
+        if content == "ping":
+            return  # Skip AI for ping
+
+        real_reply = await handle_user_message(openid, content)
+        if real_reply and real_reply != reply:
+            await send_customer_message(openid, real_reply)
     except Exception as e:
-        logger.error(f"WeChat handler error: {e}")
-        try:
-            await send_customer_message(openid, "系统繁忙，请稍后再试。")
-        except Exception:
-            pass
+        logger.error(f"Reply error: {e}")
 
 
 # ─── Health ──────────────────────────────────────────
