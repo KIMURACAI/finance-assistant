@@ -26,7 +26,7 @@ async def handle_user_message(user_id_str: str, msg_content: str) -> str:
     await add_chat(user_id, "user", msg_content)
 
     # Try local command processing first
-    local_reply = await _try_local_command(msg_content, user_id, positions)
+    local_reply = await _handle_local(msg_content, user_id, positions)
     if local_reply:
         await add_chat(user_id, "assistant", local_reply)
         return local_reply
@@ -52,7 +52,15 @@ async def handle_user_message(user_id_str: str, msg_content: str) -> str:
     return final_reply
 
 
-async def _try_local_command(msg: str, user_id: int, positions: list) -> str | None:
+async def try_local_command(user_id_str: str, msg: str) -> str | None:
+    """Try to handle message locally. Returns reply if handled, None if needs AI."""
+    user = await get_or_create_user(user_id_str)
+    user_id = user.id
+    positions = await get_user_positions(user_id)
+    return await _handle_local(msg, user_id, positions)
+
+
+async def _handle_local(msg: str, user_id: int, positions: list) -> str | None:
     """Handle common commands locally without AI."""
     msg = msg.strip()
 

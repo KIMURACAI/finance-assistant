@@ -13,7 +13,9 @@ import uvicorn
 from config import settings
 from database.db import init_db
 from core import close_client
-from handlers.message_handler import handle_user_message, push_daily_briefing
+from handlers.message_handler import (
+    handle_user_message, try_local_command, push_daily_briefing,
+)
 from scheduler.daily_task import start_scheduler, stop_scheduler
 from wechat.official_account import (
     verify_signature, parse_message, build_text_reply, send_customer_message,
@@ -71,34 +73,45 @@ async def wechat_callback(request: Request):
     content = msg.get("Content", "").strip()
 
     if msg.get("MsgType") == "text" and content and from_user:
-        # Try sync processing first (passive reply within 5s)
-        try:
-            reply = await asyncio.wait_for(
-                handle_user_message(from_user, content),
-                timeout=4.5,
+        # Phase 1: Try local processing (fast, no AI needed)
+        local_reply = await try_local_command(from_user, content)
+        if local_reply:
+            return PlainTextResponse(
+                build_text_reply(from_user, to_user, local_reply),
+                media_type="application/xml",
             )
-            if reply:
-                return PlainTextResponse(
-                    build_text_reply(from_user, to_user, reply),
-                    media_type="application/xml",
-                )
-        except asyncio.TimeoutError:
-            logger.info("Sync processing timed out, using background task")
-            asyncio.create_task(_background_reply(from_user, content))
-            return PlainTextResponse("")
+
+        # Phase 2: Needs AI → reply "thinking" immediately + background DeepSeek
+        thinking = "正在查询，请稍候..."
+        asyncio.create_task(_ai_reply_async(from_user, content))
+        return PlainTextResponse(
+            build_text_reply(from_user, to_user, thinking),
+            media_type="application/xml",
+        )
 
     return PlainTextResponse("")
 
 
-async def _background_reply(openid: str, content: str):
-    """Fallback: process async and push via customer service."""
+async def _ai_reply_async(openid: str, content: str):
+    """Background AI processing + push via customer service."""
     try:
-        reply = await handle_user_message(openid, content)
+        # Longer timeout for AI (up to 25s)
+        reply = await asyncio.wait_for(
+            handle_user_message(openid, content),
+            timeout=25.0,
+        )
         if reply:
             await send_customer_message(openid, reply)
-            logger.info(f"Background reply sent to {openid[:10]}")
+            logger.info(f"AI reply sent to {openid[:10]}")
+    except asyncio.TimeoutError:
+        logger.warning(f"AI timeout for {openid[:10]}")
+        await send_customer_message(openid, "查询超时，请简化问题后重试。")
     except Exception as e:
-        logger.error(f"Background reply error: {e}")
+        logger.error(f"AI reply error: {e}")
+        try:
+            await send_customer_message(openid, "查询出错，请稍后再试。")
+        except Exception:
+            pass
 
 
 @app.get("/health")
