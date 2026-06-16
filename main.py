@@ -128,18 +128,24 @@ async def test_deepseek():
     """Test DeepSeek from Railway."""
     import time
     from core import get_client
-    try:
-        t0 = time.time()
-        client = get_client()
-        resp = await client.post(
-            "https://api.deepseek.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
-            json={"model": settings.DEEPSEEK_MODEL, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
-            timeout=15,
-        )
-        return {"status": resp.status_code, "time": round(time.time() - t0, 2), "ok": resp.status_code == 200}
-    except Exception as e:
-        return {"status": "error", "error": str(e)[:100]}
+    for url in [
+        "https://api.deepseek.com/v1/chat/completions",
+        "https://api.deepseek.com/beta/chat/completions",
+    ]:
+        try:
+            t0 = time.time()
+            client = get_client()
+            resp = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
+                json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
+                timeout=10,
+            )
+            return {"url": url, "status": resp.status_code, "time": round(time.time() - t0, 2)}
+        except Exception as e:
+            continue
+    return {"status": "error", "message": "All DeepSeek endpoints timed out from US"}
+
 
 
 if __name__ == "__main__":
