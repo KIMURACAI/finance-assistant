@@ -64,10 +64,7 @@ async def handle_user_message(wecom_user_id: str, msg_content: str):
     # 7. 保存 AI 回复
     await add_chat(user_id, "assistant", reply_text, msg_type="text")
 
-    # 8. 发送到微信
-    await push_text(wecom_user_id, reply_text)
-    logger.info(f"回复用户 [{wecom_user_id}] 成功")
-
+    logger.info(f"处理用户 [{wecom_user_id}] 消息完成")
     return reply_text
 
 

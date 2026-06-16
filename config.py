@@ -18,8 +18,13 @@ class Settings(BaseSettings):
     DEEPSEEK_MAX_TOKENS: int = 2000
     DEEPSEEK_TEMPERATURE: float = 0.7
 
-    # ─── Server酱（微信推送）──────────────────────────
+    # ─── Server酱（微信推送，备用）─────────────────────
     SERVERCHAN_SENDKEY: str = ""         # SendKey
+
+    # ─── 微信公众号（测试号）───────────────────────────
+    WECHAT_APP_ID: str = ""              # appID
+    WECHAT_APP_SECRET: str = ""          # appsecret
+    WECHAT_TOKEN: str = "finance123"     # Token（回调验证用，自己设）
 
     # ─── 推送配置 ───────────────────────────────────────
     PUSH_TIME_MORNING: str = "08:30"      # 早间简报推送时间
