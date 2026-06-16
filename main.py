@@ -123,6 +123,25 @@ async def health():
     }
 
 
+@app.get("/test/deepseek")
+async def test_deepseek():
+    """Test DeepSeek from Railway."""
+    import time
+    from core import get_client
+    try:
+        t0 = time.time()
+        client = get_client()
+        resp = await client.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
+            json={"model": settings.DEEPSEEK_MODEL, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
+            timeout=15,
+        )
+        return {"status": resp.status_code, "time": round(time.time() - t0, 2), "ok": resp.status_code == 200}
+    except Exception as e:
+        return {"status": "error", "error": str(e)[:100]}
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", settings.PORT))
     uvicorn.run("main:app", host=settings.HOST, port=port, log_level="info")
