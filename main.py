@@ -53,6 +53,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Finance Assistant", version="2.0.0", lifespan=lifespan)
 
+# Background task store
+_bg_tasks: set = set()
+
 
 @app.api_route("/wechat/callback", methods=["GET", "POST"])
 async def wechat_callback(request: Request):
@@ -83,7 +86,9 @@ async def wechat_callback(request: Request):
 
         # Phase 2: Needs AI → reply "thinking" immediately + background DeepSeek
         thinking = "正在查询，请稍候..."
-        asyncio.create_task(_ai_reply_async(from_user, content))
+        task = asyncio.create_task(_ai_reply_async(from_user, content))
+        task.add_done_callback(_bg_tasks.discard)
+        _bg_tasks.add(task)
         return PlainTextResponse(
             build_text_reply(from_user, to_user, thinking),
             media_type="application/xml",
