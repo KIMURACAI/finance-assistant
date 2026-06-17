@@ -135,6 +135,79 @@ def _build_system_prompt(positions: list[dict], preferences: dict) -> str:
     return prompt
 
 
+# ═══════════════════════════════════════════════════════════════
+# DECISION ENGINE — classifies intent, returns structured JSON
+# Does NOT answer. Does NOT explain. ONLY classifies.
+# ═══════════════════════════════════════════════════════════════
+
+DECISION_ENGINE_PROMPT = """Classify user intent. Return JSON only. No explanation.
+
+Categories:
+STATIC_KNOWLEDGE — definitions, theory, history, concepts. web=false.
+REALTIME_INFORMATION — current prices, news, events. web=true.
+DECISION_SUPPORT — should I buy/sell, recommendations, judgment. web=true.
+RESEARCH_ANALYSIS — deep industry/company analysis. web=true.
+CLARIFICATION_REQUIRED — ambiguous, broad categories without specifics.
+
+Reason about user objective, not just keywords. When uncertain, default web=true.
+
+Return ONLY: {"category":"...","need_web":true|false,"clarification_needed":true|false,"confidence":0.0-1.0}"""
+
+# Cache for classification results: {query_hash: (expires_at, result)}
+_classify_cache: dict[str, tuple[float, dict]] = {}
+
+
+async def classify_intent(user_message: str) -> dict:
+    """Decision engine: classify user intent using model reasoning.
+
+    Returns: {"category": str, "need_web": bool, "clarification_needed": bool, "confidence": float}
+    Does NOT answer the question. ONLY classifies.
+    """
+    cache_key = hashlib.md5(("intent:" + user_message).encode()).hexdigest()
+    if cache_key in _classify_cache:
+        expires, val = _classify_cache[cache_key]
+        if time.time() < expires:
+            return val
+        del _classify_cache[cache_key]
+
+    client = get_client()
+    try:
+        resp = await client.post(
+            API_URL,
+            headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
+            json={
+                "model": settings.DEEPSEEK_MODEL,
+                "messages": [
+                    {"role": "system", "content": DECISION_ENGINE_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+                "temperature": 0,
+                "max_tokens": 100,
+            },
+            timeout=httpx.Timeout(8.0, connect=5.0),
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            raw = data["choices"][0]["message"]["content"].strip()
+            # Extract JSON
+            json_str = raw
+            if json_str.startswith("```"):
+                json_str = re.sub(r'^```(?:json)?\s*', '', json_str)
+                json_str = re.sub(r'\s*```$', '', json_str)
+            result = json.loads(json_str)
+            # Cache for 30s
+            _classify_cache[cache_key] = (time.time() + 30, result)
+            if len(_classify_cache) > 300:
+                oldest = min(_classify_cache, key=lambda k: _classify_cache[k][0])
+                del _classify_cache[oldest]
+            return result
+    except Exception as e:
+        logger.warning(f"Decision engine failed: {e}")
+
+    # Fallback: conservative defaults
+    return {"category": "REALTIME_INFORMATION", "need_web": True, "clarification_needed": False, "confidence": 0.5}
+
+
 def _check_ambiguous(msg: str) -> str:
     """Detect ambiguous questions. Returns clarification text or empty string.
 
@@ -285,71 +358,51 @@ async def route_and_execute_tools(
 
     Returns: {"category": str, "search_ctx": str, "market_ctx": str, "system_note": str}
     """
-    category = _classify_question(user_message)
-    logger.info(f"Router classified [{user_message[:50]}] → {category}")
+    # Use decision engine for reasoning-based classification
+    intent = await classify_intent(user_message)
+    category = intent.get("category", "REALTIME_INFORMATION")
+    need_web = intent.get("need_web", True)
+    clarification_needed = intent.get("clarification_needed", False)
+    confidence = intent.get("confidence", 0.5)
+    logger.info(
+        f"Decision engine [{user_message[:50]}] → {category} "
+        f"web={need_web} clarify={clarification_needed} conf={confidence}"
+    )
 
-    # ── Category 1: Date/Time ──
-    if category == "datetime":
-        dt_ctx = _get_datetime_context()
+    if clarification_needed and category == "CLARIFICATION_REQUIRED":
         return {
-            "category": "datetime",
-            "search_ctx": dt_ctx,
+            "category": "clarification",
+            "search_ctx": f"用户问题模糊，需要先澄清再回答。反问用户具体想了解哪个方面。",
+            "market_ctx": "",
+            "system_note": "先反问用户澄清意图，不要直接回答。",
+        }
+
+    # ── STATIC_KNOWLEDGE: no tools needed ──
+    if category == "STATIC_KNOWLEDGE":
+        return {
+            "category": "static_knowledge",
+            "search_ctx": "",
             "market_ctx": "",
             "system_note": "",
         }
 
-    # ── Category 3: Financial data ──
-    if category == "financial":
-        market_task = _fetch_market_context(user_message, positions)
-        search_task = _tavily_search(user_message, max_results=5)
+    # ── REALTIME / DECISION / RESEARCH: search + market ──
+    market_task = _fetch_market_context(user_message, positions)
+    search_task = _tavily_search(user_message, max_results=5)
 
-        market_ctx, search_ctx = await asyncio.gather(
-            market_task, search_task, return_exceptions=True,
-        )
-        if isinstance(market_ctx, Exception):
-            market_ctx = ""
-        if isinstance(search_ctx, Exception):
-            search_ctx = ""
+    market_ctx, search_ctx = await asyncio.gather(
+        market_task, search_task, return_exceptions=True,
+    )
+    if isinstance(market_ctx, Exception):
+        market_ctx = ""
+    if isinstance(search_ctx, Exception):
+        search_ctx = ""
 
-        return {
-            "category": "financial",
-            "search_ctx": search_ctx,
-            "market_ctx": market_ctx,
-            "system_note": "注意: 财务数据应引用搜索结果和行情数据中的具体数字，不要编造。",
-        }
-
-    # ── Category 2: Realtime ──
-    if category == "realtime":
-        market_task = _fetch_market_context(user_message, positions)
-        search_task = _tavily_search(user_message, max_results=5)
-
-        market_ctx, search_ctx = await asyncio.gather(
-            market_task, search_task, return_exceptions=True,
-        )
-        if isinstance(market_ctx, Exception):
-            market_ctx = ""
-        if isinstance(search_ctx, Exception):
-            search_ctx = ""
-
-        if not search_ctx:
-            logger.warning(
-                f"Search unavailable for realtime: {user_message[:50]}. "
-                f"Model will hedge with available data."
-            )
-
-        return {
-            "category": "realtime",
-            "search_ctx": search_ctx,
-            "market_ctx": market_ctx,
-            "system_note": "" if search_ctx else "本次未获取到实时搜索数据，可以使用已有行情数据或基础知识回答，但不要编造具体数字。",
-        }
-
-    # ── Category 4: Knowledge (no tools) ──
     return {
-        "category": "knowledge",
-        "search_ctx": "",
-        "market_ctx": "",
-        "system_note": "",
+        "category": category.lower(),
+        "search_ctx": search_ctx,
+        "market_ctx": market_ctx,
+        "system_note": "" if search_ctx else "搜索未获取到实时数据，可用市场数据或知识回答，不编造具体数字。",
     }
 
 
@@ -558,7 +611,8 @@ async def _fetch_market_context(
         get_batch_quotes, fetch_hot_rank,
     )
 
-    is_market = _classify_question(user_message) != "knowledge"
+    # Always fetch market data when positions exist — router already decided to call us
+    is_market = True
     has_positions = bool(positions)
 
     # Extract stock codes from the message itself
@@ -666,7 +720,7 @@ async def chat(
     system_note = tools["system_note"]
 
     # ── Cache check (knowledge category only) ──
-    if category == "knowledge" and len(user_message) < 50:
+    if category in ("static_knowledge", "STATIC_KNOWLEDGE") and len(user_message) < 50:
         cache_key = _make_cache_key(user_message, pos_hash, "")
         cached = _get_cached(cache_key)
         if cached:
@@ -677,14 +731,7 @@ async def chat(
     compressed_history = _compress_history(chat_history)
 
     if search_ctx:
-        if category == "datetime":
-            prefix = "【当前日期时间 - 代码获取，绝对准确】"
-        elif category == "realtime":
-            prefix = "【网络搜索结果 - 优先使用这些实时数据】"
-        elif category == "financial":
-            prefix = "【财务数据 + 网络搜索结果】"
-        else:
-            prefix = "【外部数据】"
+        prefix = "【外部数据 - 必须优先使用】"
         system_prompt += "\n\n" + prefix + "\n" + search_ctx
 
     if market_ctx:
@@ -764,7 +811,7 @@ async def chat(
     display = verified["display_text"]
 
     # ── Cache only non-realtime short responses ──
-    if category == "knowledge" and len(user_message) < 50 and len(display) < 300:
+    if category in ("static_knowledge", "STATIC_KNOWLEDGE") and len(user_message) < 50 and len(display) < 300:
         _set_cache(_make_cache_key(user_message, pos_hash, ""), display)
 
     return display
