@@ -212,30 +212,33 @@ def _verify_and_parse(
     verified_data = parsed.get("verified_data", [])
     analysis = parsed.get("analysis", "")
 
-    # Gate 1: If market context exists but AI didn't cite any verified data → suspicious
-    if market_context and not verified_data and _is_factual_question(user_message):
-        logger.warning(f"Factual question with market data but no verified_data cited. confidence={confidence}")
-        # Force low confidence
-        if confidence >= 80:
-            confidence = 70
+    # ── Verification layer: audit + confidence check, no forced downgrade ──
 
-    # Gate 2: Check each verified_data item against market context
+    # Gate 1 (audit only): warn if factual question but no verified_data cited
+    if market_context and not verified_data and _is_factual_question(user_message):
+        logger.warning(
+            f"Gate 1: factual question with external data but no verified_data cited. "
+            f"AI confidence={confidence}. Not downgrading — trusting AI self-assessment."
+        )
+
+    # Gate 2 (audit only): check cross-reference between verified_data and context
     if verified_data and market_context:
         match_count = 0
         for item in verified_data:
-            # Check if key numbers from the item appear in market context
             numbers = re.findall(r'\d+\.?\d*', str(item))
             if numbers:
                 hits = sum(1 for n in numbers if n in market_context)
-                if hits >= len(numbers) * 0.5:  # at least 50% of numbers match
+                if hits >= len(numbers) * 0.5:
                     match_count += 1
         if match_count < len(verified_data) * 0.5 and len(verified_data) > 0:
-            logger.warning(f"Verification failed: only {match_count}/{len(verified_data)} items match market data")
-            if confidence >= 80:
-                confidence = min(confidence, 70)
+            logger.warning(
+                f"Gate 2: only {match_count}/{len(verified_data)} verified_data items "
+                f"cross-reference with context. AI confidence={confidence}. "
+                f"Not downgrading — trusting AI self-assessment."
+            )
 
-    # Gate 3: confidence_score adjudication
-    if confidence < 80:
+    # Gate 3: confidence_score adjudication (threshold 70 — AI is conservative at temp=0.1)
+    if confidence < 70:
         return {
             "status": "low_confidence",
             "display_text": "LOW CONFIDENCE",
