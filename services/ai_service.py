@@ -121,6 +121,7 @@ async def chat(
     client = get_client()
     for attempt in range(2):  # Try twice
         try:
+            logger.info(f"DeepSeek API 请求 attempt={attempt+1} model={settings.DEEPSEEK_MODEL} msg_len={len(user_message)}")
             resp = await client.post(
                 API_URL,
                 headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},

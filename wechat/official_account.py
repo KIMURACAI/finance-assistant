@@ -55,6 +55,9 @@ async def _get_access_token() -> str:
         expires = data.get("expires_in", 7200)
         if token:
             wechat_token_cache.set("wechat:access_token", token, ttl=expires - 60)
+            logger.info(f"WeChat token获取成功 expires_in={expires}")
+        else:
+            logger.error(f"WeChat token获取失败: {data.get('errcode')} {data.get('errmsg')}")
         return token
     except Exception as e:
         logger.error(f"Get WeChat token failed: {e}")
