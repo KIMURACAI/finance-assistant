@@ -110,7 +110,13 @@ async def wechat_callback(request: Request):
     _req_metrics["last_post_body"] = body[:200].decode("utf-8", errors="replace")
     logger.info(f"收到微信消息 raw={_req_metrics['last_post_body']}")
 
-    msg = parse_message(body)
+    try:
+        msg = parse_message(body)
+    except Exception as parse_err:
+        logger.error(f"XML解析失败: {parse_err} body={body[:300]}")
+        _req_metrics["last_post_body"] = f"PARSE_ERROR: {parse_err}"
+        return PlainTextResponse("")
+
     _req_metrics["post_parsed"] += 1
     logger.info(f"解析消息 type={msg.get('MsgType')} from={msg.get('FromUserName','')[:10]} content={msg.get('Content','')[:50]}")
 
