@@ -39,6 +39,26 @@ async def get_session() -> AsyncSession:
 
 
 # ─── User ─────────────────────────────────────────────
+async def get_all_users() -> list[User]:
+    """Get all registered users (for scheduled pushes)."""
+    async with AsyncSessionLocal() as ses:
+        result = await ses.execute(select(User))
+        return list(result.scalars().all())
+
+
+async def get_recent_active_users(hours: int = 48) -> list[User]:
+    """Get users who chatted within N hours (WeChat 48h window)."""
+    from datetime import timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    async with AsyncSessionLocal() as ses:
+        result = await ses.execute(
+            select(User).join(ChatHistory, ChatHistory.user_id == User.id)
+            .where(ChatHistory.created_at >= cutoff)
+            .distinct()
+        )
+        return list(result.scalars().all())
+
+
 async def get_or_create_user(wecom_user_id: str, name: str = "") -> User:
     async with AsyncSessionLocal() as ses:
         result = await ses.execute(select(User).where(User.wecom_user_id == wecom_user_id))

@@ -274,6 +274,34 @@ async def test_wechat_token():
     }
 
 
+@app.get("/test/trigger-closing")
+async def test_trigger_closing():
+    """Manually trigger closing summary push to all active users."""
+    from database.db import get_recent_active_users
+    from handlers.message_handler import push_daily_briefing
+
+    users = await get_recent_active_users(hours=48)
+    if not users:
+        return {"status": "ok", "note": "no active users in 48h window", "count": 0}
+
+    results = []
+    for user in users:
+        try:
+            await push_daily_briefing(user.wecom_user_id, "closing")
+            results.append({"uid": user.wecom_user_id[:12] + "...", "ok": True})
+        except Exception as e:
+            results.append({"uid": user.wecom_user_id[:12] + "...", "ok": False, "error": str(e)})
+
+    ok_count = sum(1 for r in results if r["ok"])
+    return {
+        "status": "ok",
+        "total": len(users),
+        "ok": ok_count,
+        "failed": len(users) - ok_count,
+        "results": results,
+    }
+
+
 @app.get("/test/ai-flow")
 async def test_ai_flow(msg: str = "你好"):
     """End-to-end test: local command + AI + WeChat push."""

@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     # Scheduler
     PUSH_TIME_MORNING: str = "08:30"
-    PUSH_TIME_EVENING: str = "17:30"
+    PUSH_TIME_EVENING: str = "15:05"
 
     # Cache TTLs (seconds)
     MARKET_CACHE_TTL: int = 180
