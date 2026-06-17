@@ -149,15 +149,68 @@ def _requires_web_search(msg: str) -> bool:
     return False
 
 
-# Local-only intents — skip search entirely, handled by message_handler
-_LOCAL_INTENTS = {
-    "你好", "hi", "hello", "在吗", "您好", "帮助", "help",
-    "功能", "菜单", "?", "你能做什么", "有什么功能", "使用说明",
-    "添加持仓", "添加", "删除持仓", "删除", "移除", "持仓", "我的股票",
-}
+# ═══════════════════════════════════════════════════════════════
+# TOOL EXECUTION ROUTER — code decides, model has ZERO control
+# ═══════════════════════════════════════════════════════════════
+# The router runs BEFORE the model. The model receives results,
+# never decides whether tools are needed.
+
+async def route_and_execute_tools(
+    user_message: str, positions: list[dict],
+) -> dict:
+    """Router: decide which tools to run, execute them, return results.
+
+    This is a CODE-ONLY decision. The model has NO input on whether
+    tools are executed. The model only sees the results.
+
+    Returns:
+        {"search_ctx": str, "market_ctx": str, "needs_search": bool}
+    """
+    needs_search = _requires_web_search(user_message)
+
+    if not needs_search:
+        # Non-realtime: market data only, no web search
+        market_ctx = await _fetch_market_context(user_message, positions)
+        if isinstance(market_ctx, Exception):
+            market_ctx = ""
+        return {
+            "search_ctx": "",
+            "market_ctx": market_ctx,
+            "needs_search": False,
+        }
+
+    # Realtime: fetch market data + web search in parallel
+    market_task = _fetch_market_context(user_message, positions)
+    search_task = _tavily_search(user_message, max_results=5)
+
+    market_ctx, search_ctx = await asyncio.gather(
+        market_task, search_task, return_exceptions=True,
+    )
+    if isinstance(market_ctx, Exception):
+        logger.warning(f"Market fetch failed: {market_ctx}")
+        market_ctx = ""
+    if isinstance(search_ctx, Exception):
+        logger.warning(f"Tavily search exception: {search_ctx}")
+        search_ctx = ""
+
+    if not search_ctx:
+        logger.warning(
+            f"Search unavailable for: {user_message[:50]}. "
+            f"Proceeding with available data — model will hedge."
+        )
+    else:
+        logger.info(
+            f"Search OK: query={user_message[:50]} result_len={len(search_ctx)}"
+        )
+
+    return {
+        "search_ctx": search_ctx,
+        "market_ctx": market_ctx,
+        "needs_search": True,
+    }
 
 
-# Tavily search cache: {query_hash: (expires_at, formatted_result)}
+# ── Tavily search cache ──
 _tavily_cache: dict[str, tuple[float, str]] = {}
 
 
@@ -438,67 +491,32 @@ async def chat(
     preferences: dict,
     chat_history: list[dict],
 ) -> str:
-    """Routing layer: detect realtime intent → force web search → inject → generate.
+    """AI chat with tool execution enforced by code, not model.
 
-    WORKFLOW:
-      User question → check keywords → if realtime: web search MUST execute
-      → inject results into context → generate answer
-      → if search fails after 2 retries: SEARCH TEMPORARILY FAILED
+    WORKFLOW (model has ZERO control over tool decisions):
+      1. route_and_execute_tools() — CODE decides → runs tools → returns data
+      2. Build prompt with tool results
+      3. Call model for text generation ONLY
     """
     pos_hash = hashlib.md5(str(positions).encode()).hexdigest()[:8]
-    needs_search = _requires_web_search(user_message)
 
-    # ── Cache check (skip for search-required questions) ──
-    if not needs_search and len(user_message) < 50:
+    # ── STEP 1: Route & execute tools (CODE decision, model not involved) ──
+    tools = await route_and_execute_tools(user_message, positions)
+    search_ctx = tools["search_ctx"]
+    market_ctx = tools["market_ctx"]
+    needs_search = tools["needs_search"]
+
+    # ── Cache check (non-realtime only) ──
+    if not needs_search and not search_ctx and len(user_message) < 50:
         cache_key = _make_cache_key(user_message, pos_hash, "")
         cached = _get_cached(cache_key)
         if cached:
             return cached
 
-    # ── Build system prompt ──
+    # ── STEP 2: Build prompt with tool results ──
     system_prompt = _build_system_prompt(positions, preferences)
     compressed_history = _compress_history(chat_history)
 
-    # ═══════════════════════════════════════════
-    # ROUTING LAYER: enforce web search for realtime questions
-    # ═══════════════════════════════════════════
-    market_ctx = ""
-    search_ctx = ""
-
-    if needs_search:
-        # Fetch market data + web search in parallel
-        market_task = _fetch_market_context(user_message, positions)
-        search_task = _tavily_search(user_message, max_results=5)
-
-        market_ctx, search_ctx = await asyncio.gather(
-            market_task, search_task, return_exceptions=True,
-        )
-        if isinstance(market_ctx, Exception):
-            logger.warning(f"Market fetch failed: {market_ctx}")
-            market_ctx = ""
-        if isinstance(search_ctx, Exception):
-            logger.warning(f"Tavily search exception: {search_ctx}")
-            search_ctx = ""
-
-        if not search_ctx:
-            logger.warning(
-                f"Search unavailable for: {user_message[:50]}. "
-                f"Proceeding with market data only — AI will hedge appropriately."
-            )
-            # Don't block — let AI answer with available data + hedging
-        else:
-            logger.info(
-                f"Search OK: query={user_message[:50]} "
-                f"result_len={len(search_ctx)}"
-            )
-    else:
-        # Non-realtime: fetch market data only (no search required)
-        market_task = _fetch_market_context(user_message, positions)
-        market_ctx = await market_task
-        if isinstance(market_ctx, Exception):
-            market_ctx = ""
-
-    # ── Inject external data into system prompt ──
     if search_ctx:
         system_prompt += "\n\n" + "【网络搜索结果 - 优先使用这些实时数据】\n" + search_ctx
     if market_ctx:
@@ -506,10 +524,11 @@ async def chat(
     if not search_ctx and not market_ctx and needs_search:
         system_prompt += "\n\n" + "注意: 本次未获取到外部实时数据。可以基于你的知识提供分析，但不要编造具体数字。不确定的地方请说明。"
 
-    # ── Build messages ──
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(compressed_history)
     messages.append({"role": "user", "content": user_message})
+
+    # ── STEP 3: Call model for text generation ONLY (no tool decisions) ──
 
     # ── Call AI with temperature 0.1 ──
     payload = {
