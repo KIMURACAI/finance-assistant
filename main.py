@@ -58,6 +58,21 @@ app = FastAPI(title="Finance Assistant", version="2.0.0", lifespan=lifespan)
 # Background task store
 _bg_tasks: set = set()
 
+# Request metrics
+_req_metrics = {
+    "get_count": 0,
+    "post_count": 0,
+    "post_invalid_sig": 0,
+    "post_parsed": 0,
+    "post_local_hit": 0,
+    "post_ai_triggered": 0,
+    "post_other": 0,
+    "last_post_at": None,
+    "last_post_body": "",
+    "last_post_from": "",
+    "last_post_content": "",
+}
+
 
 @app.api_route("/wechat/callback", methods=["GET", "POST"])
 async def wechat_callback(request: Request):
@@ -66,6 +81,7 @@ async def wechat_callback(request: Request):
     # 微信服务器验证（临时关闭签名验证测试）
     # ==============================
     if request.method == "GET":
+        _req_metrics["get_count"] += 1
         p = dict(request.query_params)
 
         # 直接返回 echostr，不校验 signature
@@ -77,22 +93,25 @@ async def wechat_callback(request: Request):
     # ==============================
     # 处理微信用户消息
     # ==============================
+    _req_metrics["post_count"] += 1
     p = dict(request.query_params)
 
-    # POST 暂时保留原验证
     sig_ok = await verify_signature(
         p.get("signature", ""),
         p.get("timestamp", ""),
         p.get("nonce", "")
     )
     if not sig_ok:
+        _req_metrics["post_invalid_sig"] += 1
         logger.warning(f"签名验证失败 signature={p.get('signature','')[:8]}...")
         return PlainTextResponse("invalid")
 
     body = await request.body()
-    logger.info(f"收到微信消息 raw={body[:200]}")
+    _req_metrics["last_post_body"] = body[:200].decode("utf-8", errors="replace")
+    logger.info(f"收到微信消息 raw={_req_metrics['last_post_body']}")
 
     msg = parse_message(body)
+    _req_metrics["post_parsed"] += 1
     logger.info(f"解析消息 type={msg.get('MsgType')} from={msg.get('FromUserName','')[:10]} content={msg.get('Content','')[:50]}")
 
     from_user = msg.get("FromUserName", "")
@@ -102,9 +121,12 @@ async def wechat_callback(request: Request):
     if msg.get("MsgType") == "text" and content and from_user:
 
         # Phase 1: 本地命令优先处理
+        _req_metrics["last_post_from"] = from_user
+        _req_metrics["last_post_content"] = content
         local_reply = await try_local_command(from_user, content)
 
         if local_reply:
+            _req_metrics["post_local_hit"] += 1
             logger.info(f"本地命令命中: {local_reply[:50]}")
             return PlainTextResponse(
                 build_text_reply(from_user, to_user, local_reply),
@@ -112,6 +134,7 @@ async def wechat_callback(request: Request):
             )
 
         # Phase 2: AI后台异步处理
+        _req_metrics["post_ai_triggered"] += 1
         logger.info(f"启动AI后台处理: {content[:50]}")
         thinking = "正在查询，请稍候..."
 
@@ -128,6 +151,7 @@ async def wechat_callback(request: Request):
         )
 
     logger.info(f"消息未处理 type={msg.get('MsgType')} has_content={bool(content)} has_user={bool(from_user)}")
+    _req_metrics["post_other"] += 1
     return PlainTextResponse("")
 
 
@@ -173,6 +197,12 @@ async def health():
         "deepseek": bool(settings.DEEPSEEK_API_KEY),
         "wechat": bool(settings.WECHAT_APP_ID),
     }
+
+
+@app.get("/debug/metrics")
+async def debug_metrics():
+    """View request metrics for debugging."""
+    return _req_metrics
 
 
 @app.get("/test/deepseek")
