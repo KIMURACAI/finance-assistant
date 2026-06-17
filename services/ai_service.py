@@ -16,39 +16,26 @@ from core import get_client, retry, market_cache
 API_URL = f"{settings.DEEPSEEK_BASE_URL}/chat/completions"
 
 
-SYSTEM_PROMPT_CORE = """你是金融资讯助手。严格执行以下反幻觉规则（ANTI-HALLUCINATION POLICY）：
+SYSTEM_PROMPT_CORE = """你是金融资讯助手。反幻觉规则：
+
+1. 只使用下方【网络搜索结果】和【实时行情数据】中的真实数据回答。
+   绝不使用内部知识编造任何数字、日期、事件。
+
+2. 每个事实声明必须可追溯到提供的数据。无法验证 → 不输出。
+
+3. confidence_score:
+   • 95-100: 所有声明来自提供的数据，多源交叉验证
+   • 80-94:  大多数匹配，少量格式化差异
+   • 70-79:  部分数据支撑但不够完整
+   • < 70:   无法验证 → 只回答 LOW CONFIDENCE
+
+4. 持仓管理命令附加在 analysis 末尾。
+
+5. 网络搜索结果优先于行情数据（搜索更新更快）。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-CRITICAL RULES — VIOLATION = FAILURE
-━━━━━━━━━━━━━━━━━━━━━━
-
-1. NEVER answer factual/data questions from internal knowledge.
-   You MUST only use data from the 【实时行情数据】 and 【网络搜索结果】 sections below.
-   If both sections are empty/absent for a factual question → output NO VERIFIED DATA FOUND.
-
-2. Every factual claim (price, change%, volume, index, event, date, name)
-   MUST be traceable to either 【实时行情数据】 or 【网络搜索结果】.
-   No rounding, no estimation, no inference.
-
-3. Before writing analysis, verify each factual claim against the provided data.
-   If a claim cannot be verified → do NOT include it.
-
-4. confidence_score rules:
-   • 95-100: all claims verbatim from provided data, multiple sources
-   • 80-94:  most claims match provided data, minor reformatting
-   • < 80:   any unverifiable statement → respond LOW CONFIDENCE only
-   • 0:      no data available for this question
-
-5. Position management commands go inside the analysis field as add/remove JSON blocks.
-
-6. 【网络搜索结果】 provides real-time web search data. Treat it as authoritative.
-   Prefer search results over market data when they conflict (search is fresher).
-
-━━━━━━━━━━━━━━━━━━━━━━
-MANDATORY OUTPUT FORMAT (strict JSON, no markdown, no extra text)
-━━━━━━━━━━━━━━━━━━━━━━
-
-{"question":"<user question>","verified_data":["<each data point used, quoting from provided sections>"],"analysis":"<analysis using ONLY verified data. For greetings/small-talk, reply naturally here. For position commands, append ```json {{\"cmd\":...}}``` at end>","confidence_score":<0-100>,"sources":["<data source names>"]}"""
+只输出以下JSON，不要额外文字:
+{"question":"用户问题","verified_data":["引用的数据点"],"analysis":"基于数据的分析","confidence_score":0-100,"sources":["数据来源"]}"""
 
 
 def _make_cache_key(user_message: str, positions_hash: str, history_tail: str) -> str:
@@ -102,23 +89,57 @@ def _build_system_prompt(positions: list[dict], preferences: dict) -> str:
     return prompt
 
 
-def _is_factual_question(msg: str) -> bool:
-    """Detect questions that require external data — must NOT be answered from model memory."""
-    factual_kw = [
-        "行情", "大盘", "指数", "上证", "深证", "创业板", "走势",
-        "涨跌", "涨停", "跌停", "涨幅", "跌幅", "热门", "板块", "行业",
-        "股票", "股价", "价格", "多少", "多少点", "最新", "现在",
-        "实时", "今天", "今日", "目前", "分析", "预测", "建议",
-        "龙虎", "热点", "概念", "北向", "成交", "市值", "PE", "估值",
-        "基金", "净值", "收益", "财报", "业绩", "公告", "新闻",
-        "代码", "查", "查询", "帮我", "能否", "是否", "怎样",
-        "怎么样", "如何", "怎么看", "评价", "评级",
+def _requires_web_search(msg: str) -> bool:
+    """Routing layer: determine if question MUST trigger web search before answering.
+
+    Returns True if the question contains any realtime/time-sensitive keyword.
+    Model is FORBIDDEN from answering these without search results.
+    """
+    realtime_keywords = [
+        # Time-sensitive
+        "today", "today's", "latest", "recent", "current", "update",
+        "今天", "今日", "最新", "最近", "目前", "现在", "当前",
+        # Financial instruments
+        "price", "stock", "market", "gold", "bitcoin", "crypto",
+        "股价", "价格", "股票", "行情", "黄金", "比特币",
+        # Market data
+        "index", "nasdaq", "dow", "s&p", "hang seng", "nikkei",
+        "指数", "上证", "深证", "创业板", "恒生", "纳斯达克",
+        # News & events
+        "news", "announced", "reported", "earnings", "dividend",
+        "新闻", "公告", "财报", "业绩", "分红",
+        # Policy & macro
+        "policy", "fed", "interest rate", "inflation", "gdp",
+        "政策", "利率", "央行", "通胀", "GDP",
+        # Sectors & companies
+        "company", "technology", "tech", "sector", "industry",
+        "公司", "科技", "板块", "行业", "概念",
+        # General realtime
+        "weather", "website",
+        # Analysis requests
+        "分析", "预测", "建议", "怎么看", "怎么样", "如何",
+        # Stock code patterns (6-digit A-share codes)
     ]
     msg_lower = msg.lower()
-    # Short codes like "600519" are factual queries
-    if len(msg.strip()) <= 8 and any(c.isdigit() for c in msg):
+
+    # Check keyword matches
+    for kw in realtime_keywords:
+        if kw.lower() in msg_lower:
+            return True
+
+    # Check for stock code patterns (6-digit number)
+    if re.search(r'\b\d{6}\b', msg):
         return True
-    return any(kw in msg_lower for kw in factual_kw)
+
+    return False
+
+
+# Local-only intents — skip search entirely, handled by message_handler
+_LOCAL_INTENTS = {
+    "你好", "hi", "hello", "在吗", "您好", "帮助", "help",
+    "功能", "菜单", "?", "你能做什么", "有什么功能", "使用说明",
+    "添加持仓", "添加", "删除持仓", "删除", "移除", "持仓", "我的股票",
+}
 
 
 # Tavily search cache: {query_hash: (expires_at, formatted_result)}
@@ -278,7 +299,7 @@ def _verify_and_parse(
     # ── Verification layer: audit + confidence check, no forced downgrade ──
 
     # Gate 1 (audit only): warn if factual question but no verified_data cited
-    if market_context and not verified_data and _is_factual_question(user_message):
+    if market_context and not verified_data and _requires_web_search(user_message):
         logger.warning(
             f"Gate 1: factual question with external data but no verified_data cited. "
             f"AI confidence={confidence}. Not downgrading — trusting AI self-assessment."
@@ -341,7 +362,7 @@ async def _fetch_market_context(
         get_batch_quotes, fetch_hot_rank,
     )
 
-    is_market = _is_factual_question(user_message)
+    is_market = _requires_web_search(user_message)
     has_positions = bool(positions)
 
     # Extract stock codes from the message itself
@@ -427,15 +448,18 @@ async def chat(
     preferences: dict,
     chat_history: list[dict],
 ) -> str:
-    """AI chat with mandatory web search: search-first, verify, structured output."""
-    pos_hash = hashlib.md5(str(positions).encode()).hexdigest()[:8]
-    history_tail = str(chat_history[-4:]) if chat_history else ""
-    is_factual = _is_factual_question(user_message)
+    """Routing layer: detect realtime intent → force web search → inject → generate.
 
-    # ── Cache check (skip for factual — data changes) ──
-    if not is_factual and len(user_message) < 50 and not any(
-        kw in user_message for kw in ["添加", "删除", "持仓"]
-    ):
+    WORKFLOW:
+      User question → check keywords → if realtime: web search MUST execute
+      → inject results into context → generate answer
+      → if search fails after 2 retries: SEARCH TEMPORARILY FAILED
+    """
+    pos_hash = hashlib.md5(str(positions).encode()).hexdigest()[:8]
+    needs_search = _requires_web_search(user_message)
+
+    # ── Cache check (skip for search-required questions) ──
+    if not needs_search and len(user_message) < 50:
         cache_key = _make_cache_key(user_message, pos_hash, "")
         cached = _get_cached(cache_key)
         if cached:
@@ -445,11 +469,17 @@ async def chat(
     system_prompt = _build_system_prompt(positions, preferences)
     compressed_history = _compress_history(chat_history)
 
-    # ── Step 1+2: Fetch market data + Tavily search IN PARALLEL ──
-    market_task = _fetch_market_context(user_message, positions)
-    search_task = _tavily_search(user_message, max_results=5) if is_factual else None
+    # ═══════════════════════════════════════════
+    # ROUTING LAYER: enforce web search for realtime questions
+    # ═══════════════════════════════════════════
+    market_ctx = ""
+    search_ctx = ""
 
-    if search_task:
+    if needs_search:
+        # Fetch market data + web search in parallel
+        market_task = _fetch_market_context(user_message, positions)
+        search_task = _tavily_search(user_message, max_results=5)
+
         market_ctx, search_ctx = await asyncio.gather(
             market_task, search_task, return_exceptions=True,
         )
@@ -457,26 +487,31 @@ async def chat(
             logger.warning(f"Market fetch failed: {market_ctx}")
             market_ctx = ""
         if isinstance(search_ctx, Exception):
-            logger.warning(f"Tavily search failed: {search_ctx}")
+            logger.warning(f"Tavily search exception: {search_ctx}")
             search_ctx = ""
+
+        # ── GATE: web search MUST succeed for realtime questions ──
+        if not search_ctx:
+            logger.error(
+                f"SEARCH FAILED for realtime question: {user_message[:80]}. "
+                f"Retries exhausted. Blocking answer."
+            )
+            return "SEARCH TEMPORARILY FAILED"
+
         logger.info(
-            f"Tavily search: query={user_message[:50]} "
-            f"results={'yes' if search_ctx else 'empty'}"
+            f"Search OK: query={user_message[:50]} "
+            f"result_len={len(search_ctx)}"
         )
     else:
+        # Non-realtime: fetch market data only (no search required)
+        market_task = _fetch_market_context(user_message, positions)
         market_ctx = await market_task
         if isinstance(market_ctx, Exception):
             market_ctx = ""
-        search_ctx = ""
 
-    # ── Anti-hallucination Gate: factual question without ANY external data ──
-    if is_factual and not market_ctx and not search_ctx:
-        logger.info(f"No external data available for factual question: {user_message[:50]}")
-        return "NO VERIFIED DATA FOUND"
-
-    # ── Inject all external data into system prompt ──
+    # ── Inject external data into system prompt ──
     if search_ctx:
-        system_prompt += "\n\n" + "【网络搜索结果 - 权威实时数据】\n" + search_ctx
+        system_prompt += "\n\n" + "【网络搜索结果 - 权威实时数据（只使用以下数据回答）】\n" + search_ctx
     if market_ctx:
         system_prompt += "\n\n" + market_ctx
 
@@ -485,11 +520,11 @@ async def chat(
     messages.extend(compressed_history)
     messages.append({"role": "user", "content": user_message})
 
-    # ── Call AI with temperature clamped to 0.1 (anti-hallucination) ──
+    # ── Call AI with temperature 0.1 ──
     payload = {
         "model": settings.DEEPSEEK_MODEL,
         "messages": messages,
-        "temperature": 0.1,  # Hard override for strict factual adherence
+        "temperature": 0.1,
         "max_tokens": settings.DEEPSEEK_MAX_TOKENS,
     }
 
@@ -498,9 +533,9 @@ async def chat(
     for attempt in range(2):
         try:
             logger.info(
-                f"DeepSeek API request attempt={attempt+1} "
-                f"model={settings.DEEPSEEK_MODEL} msg_len={len(user_message)} "
-                f"is_factual={is_factual} has_market={bool(market_ctx)} has_search={bool(search_ctx)}"
+                f"DeepSeek request attempt={attempt+1} "
+                f"needs_search={needs_search} has_search={bool(search_ctx)} "
+                f"has_market={bool(market_ctx)} msg_len={len(user_message)}"
             )
             resp = await client.post(
                 API_URL,
@@ -520,31 +555,29 @@ async def chat(
     if raw_content is None:
         return _get_fallback_reply(user_message)
 
-    # ── Verification layer (checks against both market + search context) ──
+    # ── Verification layer ──
     full_context = (search_ctx or "") + "\n" + (market_ctx or "")
     verified = _verify_and_parse(raw_content, full_context, user_message)
 
     if verified["status"] == "low_confidence":
         logger.warning(
-            f"LOW CONFIDENCE: user={user_message[:50]} "
-            f"confidence={verified['raw'].get('confidence_score', 'N/A')}"
+            f"LOW CONFIDENCE: confidence={verified['raw'].get('confidence_score')}"
         )
         return "LOW CONFIDENCE"
 
     if verified["status"] == "parse_error":
-        logger.warning(f"AI did not output valid JSON, returning raw text")
+        logger.warning("JSON parse failed, returning raw text")
         return verified["display_text"]
 
-    # ── Log structured output for audit ──
     logger.info(
-        f"AI verified OK: confidence={verified['raw'].get('confidence_score')} "
-        f"verified_data_count={len(verified['raw'].get('verified_data', []))}"
+        f"AI OK: confidence={verified['raw'].get('confidence_score')} "
+        f"verified_items={len(verified['raw'].get('verified_data', []))}"
     )
 
     display = verified["display_text"]
 
-    # ── Cache non-factual short responses ──
-    if not is_factual and len(user_message) < 50 and len(display) < 300:
+    # ── Cache only non-realtime short responses ──
+    if not needs_search and len(user_message) < 50 and len(display) < 300:
         _set_cache(_make_cache_key(user_message, pos_hash, ""), display)
 
     return display
