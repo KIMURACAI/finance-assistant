@@ -8,3 +8,4 @@ loguru
 pydantic
 pydantic-settings
 python-dateutil
+tavily-python

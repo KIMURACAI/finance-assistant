@@ -23,28 +23,32 @@ CRITICAL RULES — VIOLATION = FAILURE
 ━━━━━━━━━━━━━━━━━━━━━━
 
 1. NEVER answer factual/data questions from internal knowledge.
-   You MUST only use data from the 【实时行情数据】 section below.
-   If the section is empty or absent for a factual question → output DATA NOT AVAILABLE.
+   You MUST only use data from the 【实时行情数据】 and 【网络搜索结果】 sections below.
+   If both sections are empty/absent for a factual question → output NO VERIFIED DATA FOUND.
 
-2. Every number (price, change%, volume, index) in your response MUST
-   appear verbatim in 【实时行情数据】. No rounding, no estimation.
+2. Every factual claim (price, change%, volume, index, event, date, name)
+   MUST be traceable to either 【实时行情数据】 or 【网络搜索结果】.
+   No rounding, no estimation, no inference.
 
-3. Before writing analysis, verify each factual claim against the data.
+3. Before writing analysis, verify each factual claim against the provided data.
    If a claim cannot be verified → do NOT include it.
 
 4. confidence_score rules:
-   • 95-100: all numbers verbatim from 【实时行情数据】
-   • 80-94:  most numbers match, minor reformatting
+   • 95-100: all claims verbatim from provided data, multiple sources
+   • 80-94:  most claims match provided data, minor reformatting
    • < 80:   any unverifiable statement → respond LOW CONFIDENCE only
    • 0:      no data available for this question
 
 5. Position management commands go inside the analysis field as add/remove JSON blocks.
 
+6. 【网络搜索结果】 provides real-time web search data. Treat it as authoritative.
+   Prefer search results over market data when they conflict (search is fresher).
+
 ━━━━━━━━━━━━━━━━━━━━━━
 MANDATORY OUTPUT FORMAT (strict JSON, no markdown, no extra text)
 ━━━━━━━━━━━━━━━━━━━━━━
 
-{"question":"<user question>","verified_data":["<each data point used, quoting from 【实时行情数据】>"],"analysis":"<analysis using ONLY verified data. For greetings/small-talk, reply naturally here. For position commands, append ```json {{\"cmd\":...}}``` at end>","confidence_score":<0-100>,"sources":["<data source names>"]}"""
+{"question":"<user question>","verified_data":["<each data point used, quoting from provided sections>"],"analysis":"<analysis using ONLY verified data. For greetings/small-talk, reply naturally here. For position commands, append ```json {{\"cmd\":...}}``` at end>","confidence_score":<0-100>,"sources":["<data source names>"]}"""
 
 
 def _make_cache_key(user_message: str, positions_hash: str, history_tail: str) -> str:
@@ -115,6 +119,58 @@ def _is_factual_question(msg: str) -> bool:
     if len(msg.strip()) <= 8 and any(c.isdigit() for c in msg):
         return True
     return any(kw in msg_lower for kw in factual_kw)
+
+
+async def _tavily_search(query: str, max_results: int = 5) -> str:
+    """Search the web via Tavily API. Returns formatted results or empty string."""
+    if not settings.TAVILY_API_KEY:
+        logger.warning("Tavily API key not configured")
+        return ""
+
+    try:
+        client = get_client()
+        resp = await client.post(
+            "https://api.tavily.com/search",
+            json={
+                "query": query,
+                "max_results": max_results,
+                "search_depth": "basic",
+                "include_answer": True,
+            },
+            headers={"Authorization": f"Bearer {settings.TAVILY_API_KEY}"},
+            timeout=httpx.Timeout(15.0, connect=10.0),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        parts = []
+
+        # Tavily's AI-generated answer (if available)
+        answer = data.get("answer", "")
+        if answer:
+            parts.append(f"摘要: {answer}")
+
+        # Individual search results
+        results = data.get("results", [])
+        if results:
+            parts.append("搜索结果:")
+            for i, r in enumerate(results[:max_results], 1):
+                title = r.get("title", "")[:100]
+                content = r.get("content", "")[:200]
+                url = r.get("url", "")
+                parts.append(f"  [{i}] {title}")
+                parts.append(f"      {content}")
+                if url:
+                    parts.append(f"      URL: {url}")
+
+        if not parts:
+            return ""
+
+        return "\n".join(parts)
+
+    except Exception as e:
+        logger.warning(f"Tavily search failed: {e}")
+        return ""
 
 
 def _verify_and_parse(
@@ -283,7 +339,7 @@ async def chat(
     preferences: dict,
     chat_history: list[dict],
 ) -> str:
-    """AI chat with strict anti-hallucination: data-first, verify, structured output."""
+    """AI chat with mandatory web search: search-first, verify, structured output."""
     pos_hash = hashlib.md5(str(positions).encode()).hexdigest()[:8]
     history_tail = str(chat_history[-4:]) if chat_history else ""
     is_factual = _is_factual_question(user_message)
@@ -301,15 +357,40 @@ async def chat(
     system_prompt = _build_system_prompt(positions, preferences)
     compressed_history = _compress_history(chat_history)
 
-    # ── Fetch real-time market data ──
-    market_ctx = await _fetch_market_context(user_message, positions)
+    # ── Step 1+2: Fetch market data + Tavily search IN PARALLEL ──
+    market_task = _fetch_market_context(user_message, positions)
+    search_task = _tavily_search(user_message, max_results=5) if is_factual else None
+
+    if search_task:
+        market_ctx, search_ctx = await asyncio.gather(
+            market_task, search_task, return_exceptions=True,
+        )
+        if isinstance(market_ctx, Exception):
+            logger.warning(f"Market fetch failed: {market_ctx}")
+            market_ctx = ""
+        if isinstance(search_ctx, Exception):
+            logger.warning(f"Tavily search failed: {search_ctx}")
+            search_ctx = ""
+        logger.info(
+            f"Tavily search: query={user_message[:50]} "
+            f"results={'yes' if search_ctx else 'empty'}"
+        )
+    else:
+        market_ctx = await market_task
+        if isinstance(market_ctx, Exception):
+            market_ctx = ""
+        search_ctx = ""
+
+    # ── Anti-hallucination Gate: factual question without ANY external data ──
+    if is_factual and not market_ctx and not search_ctx:
+        logger.info(f"No external data available for factual question: {user_message[:50]}")
+        return "NO VERIFIED DATA FOUND"
+
+    # ── Inject all external data into system prompt ──
+    if search_ctx:
+        system_prompt += "\n\n" + "【网络搜索结果 - 权威实时数据】\n" + search_ctx
     if market_ctx:
         system_prompt += "\n\n" + market_ctx
-
-    # ── Anti-hallucination Gate: factual question without data → DATA NOT AVAILABLE ──
-    if is_factual and not market_ctx:
-        logger.info(f"Factual question but no market data available: {user_message[:50]}")
-        return "DATA NOT AVAILABLE"
 
     # ── Build messages ──
     messages = [{"role": "system", "content": system_prompt}]
@@ -331,7 +412,7 @@ async def chat(
             logger.info(
                 f"DeepSeek API request attempt={attempt+1} "
                 f"model={settings.DEEPSEEK_MODEL} msg_len={len(user_message)} "
-                f"is_factual={is_factual} has_market_data={bool(market_ctx)}"
+                f"is_factual={is_factual} has_market={bool(market_ctx)} has_search={bool(search_ctx)}"
             )
             resp = await client.post(
                 API_URL,
@@ -351,8 +432,9 @@ async def chat(
     if raw_content is None:
         return _get_fallback_reply(user_message)
 
-    # ── Verification layer ──
-    verified = _verify_and_parse(raw_content, market_ctx, user_message)
+    # ── Verification layer (checks against both market + search context) ──
+    full_context = (search_ctx or "") + "\n" + (market_ctx or "")
+    verified = _verify_and_parse(raw_content, full_context, user_message)
 
     if verified["status"] == "low_confidence":
         logger.warning(
@@ -362,7 +444,6 @@ async def chat(
         return "LOW CONFIDENCE"
 
     if verified["status"] == "parse_error":
-        # JSON parse failed — still return raw text but log warning
         logger.warning(f"AI did not output valid JSON, returning raw text")
         return verified["display_text"]
 

@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     NEWS_CACHE_TTL: int = 300
     AI_RESPONSE_CACHE_TTL: int = 600
 
+    # Tavily Search
+    TAVILY_API_KEY: str = ""
+
     # Rate limits
     DEEPSEEK_RPM: int = 10
     WECHAT_MSG_DAILY_LIMIT: int = 200
