@@ -16,28 +16,41 @@ from core import get_client, retry, market_cache
 API_URL = f"{settings.DEEPSEEK_BASE_URL}/chat/completions"
 
 
-SYSTEM_PROMPT_CORE = """你是金融资讯助手。反幻觉规则：
-
-0. 始终使用中文回答。即使搜索结果是英文，也必须翻译成中文输出。
-
-1. 只使用下方【网络搜索结果】和【实时行情数据】中的真实数据回答。
-   绝不使用内部知识编造任何数字、日期、事件。
-
-2. 每个事实声明必须可追溯到提供的数据。
-
-3. confidence_score 评估:
-   • 90: 多个独立来源交叉验证
-   • 70: 至少一个可信来源
-   • 50: 部分数据支撑，存在不确定性
-   • < 30: 完全无数据支撑 → 只输出 LOW CONFIDENCE
-
-4. 持仓管理命令附加在 analysis 末尾。
-
-5. 网络搜索结果优先于行情数据。
+SYSTEM_PROMPT_CORE = """你是金融资讯助手。目标是提供有帮助且准确的回答。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-只输出以下JSON，不要额外文字。analysis 字段必须用中文:
-{"question":"用户问题","verified_data":["引用的数据点"],"analysis":"用中文写分析","confidence_score":0-100,"sources":["数据来源"]}"""
+核心规则
+━━━━━━━━━━━━━━━━━━━━━━
+
+0. 始终用中文回答。
+
+1. 优先使用下方提供的外部数据（网络搜索、实时行情）回答问题。
+
+2. 当外部数据可用时，所有具体数字（价格、涨跌幅、指数点位）必须来自外部数据。
+
+3. 当外部数据不可用时：
+   - 可以基于你的知识提供分析和背景信息
+   - 但绝不编造具体的数字、日期、价格、引用来源
+   - 使用"据公开信息"、"通常"、"一般"等措辞
+   - 如果不确定某个具体数字，直接说"暂无确切数据"
+
+4. 禁止的行为：
+   ✗ 编造具体数字（价格、百分比、指数点位等）
+   ✗ 编造具体日期
+   ✗ 编造引用来源
+   ✗ 假装搜索成功实际上没有数据
+   ✗ 在不确定时假装确定
+
+5. 回答策略：
+   - 有外部数据 → 基于数据回答，引用具体数字，confidence 70-90
+   - 无外部数据但有相关知识 → 提供分析，不编造数字，用 hedging 措辞，confidence 50
+   - 完全不确定 → 诚实说不太确定，confidence 50（不要用 LOW CONFIDENCE）
+
+━━━━━━━━━━━━━━━━━━━━━━
+输出格式 (JSON)
+━━━━━━━━━━━━━━━━━━━━━━
+
+{"question":"用户问题","verified_data":["引用来源"],"analysis":"中文分析","confidence_score":50-90,"sources":["来源名称"]}"""
 
 
 def _make_cache_key(user_message: str, positions_hash: str, history_tail: str) -> str:
@@ -92,10 +105,10 @@ def _build_system_prompt(positions: list[dict], preferences: dict) -> str:
 
 
 def _requires_web_search(msg: str) -> bool:
-    """Routing layer: determine if question MUST trigger web search before answering.
+    """Routing layer: detect questions that benefit from realtime web data.
 
-    Returns True if the question contains any realtime/time-sensitive keyword.
-    Model is FORBIDDEN from answering these without search results.
+    Returns True → triggers search. If search fails, AI answers with
+    available data + hedging — never blocks the user.
     """
     realtime_keywords = [
         # Time-sensitive
@@ -467,18 +480,17 @@ async def chat(
             logger.warning(f"Tavily search exception: {search_ctx}")
             search_ctx = ""
 
-        # ── GATE: web search MUST succeed for realtime questions ──
         if not search_ctx:
-            logger.error(
-                f"SEARCH FAILED for realtime question: {user_message[:80]}. "
-                f"Retries exhausted. Blocking answer."
+            logger.warning(
+                f"Search unavailable for: {user_message[:50]}. "
+                f"Proceeding with market data only — AI will hedge appropriately."
             )
-            return "SEARCH TEMPORARILY FAILED"
-
-        logger.info(
-            f"Search OK: query={user_message[:50]} "
-            f"result_len={len(search_ctx)}"
-        )
+            # Don't block — let AI answer with available data + hedging
+        else:
+            logger.info(
+                f"Search OK: query={user_message[:50]} "
+                f"result_len={len(search_ctx)}"
+            )
     else:
         # Non-realtime: fetch market data only (no search required)
         market_task = _fetch_market_context(user_message, positions)
@@ -488,9 +500,11 @@ async def chat(
 
     # ── Inject external data into system prompt ──
     if search_ctx:
-        system_prompt += "\n\n" + "【网络搜索结果 - 权威实时数据（只使用以下数据回答）】\n" + search_ctx
+        system_prompt += "\n\n" + "【网络搜索结果 - 优先使用这些实时数据】\n" + search_ctx
     if market_ctx:
         system_prompt += "\n\n" + market_ctx
+    if not search_ctx and not market_ctx and needs_search:
+        system_prompt += "\n\n" + "注意: 本次未获取到外部实时数据。可以基于你的知识提供分析，但不要编造具体数字。不确定的地方请说明。"
 
     # ── Build messages ──
     messages = [{"role": "system", "content": system_prompt}]
