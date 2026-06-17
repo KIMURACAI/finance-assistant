@@ -58,10 +58,8 @@ async def send_bot_features(uid: str) -> bool:
 async def handle_user_message(user_id_str: str, msg_content: str) -> str:
     """Process user message: local commands + AI for analysis."""
     user = await get_or_create_user(user_id_str)
-    is_new = user.created_at == user.updated_at or (
-        user.created_at and user.updated_at and
-        (user.updated_at - user.created_at).total_seconds() < 5
-    )
+    # New user = never had an assistant reply before
+    is_new = user.created_at == user.updated_at
     user_id = user.id
     positions = await get_user_positions(user_id)
     pref = await get_or_create_pref(user_id)

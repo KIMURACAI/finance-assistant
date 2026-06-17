@@ -66,7 +66,9 @@ async def get_or_create_user(wecom_user_id: str, name: str = "") -> User:
         if user:
             if name and user.name != name:
                 user.name = name
-                await ses.commit()
+            # Always bump updated_at so is_new detection works correctly
+            user.updated_at = datetime.now(timezone.utc)
+            await ses.commit()
             return user
 
         user = User(wecom_user_id=wecom_user_id, name=name)
