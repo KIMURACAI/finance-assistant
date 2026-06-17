@@ -121,56 +121,100 @@ def _is_factual_question(msg: str) -> bool:
     return any(kw in msg_lower for kw in factual_kw)
 
 
+# Tavily search cache: {query_hash: (expires_at, formatted_result)}
+_tavily_cache: dict[str, tuple[float, str]] = {}
+
+
+def _tavily_cache_key(query: str) -> str:
+    return hashlib.md5(query.encode()).hexdigest()
+
+
 async def _tavily_search(query: str, max_results: int = 5) -> str:
-    """Search the web via Tavily API. Returns formatted results or empty string."""
+    """Search the web via Tavily API with retry + caching. Returns formatted results or empty string."""
     if not settings.TAVILY_API_KEY:
-        logger.warning("Tavily API key not configured")
         return ""
 
-    try:
-        client = get_client()
-        resp = await client.post(
-            "https://api.tavily.com/search",
-            json={
-                "query": query,
-                "max_results": max_results,
-                "search_depth": "basic",
-                "include_answer": True,
-            },
-            headers={"Authorization": f"Bearer {settings.TAVILY_API_KEY}"},
-            timeout=httpx.Timeout(15.0, connect=10.0),
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    cache_key = _tavily_cache_key(query)
+    if cache_key in _tavily_cache:
+        expires, val = _tavily_cache[cache_key]
+        if time.time() < expires:
+            logger.info(f"Tavily cache hit: {query[:40]}")
+            return val
+        del _tavily_cache[cache_key]
 
-        parts = []
+    client = get_client()
+    last_error = ""
 
-        # Tavily's AI-generated answer (if available)
-        answer = data.get("answer", "")
-        if answer:
-            parts.append(f"摘要: {answer}")
+    for attempt in range(2):
+        try:
+            resp = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": settings.TAVILY_API_KEY,
+                    "query": query,
+                    "max_results": max_results,
+                    "search_depth": "basic",
+                    "include_answer": True,
+                },
+                timeout=httpx.Timeout(15.0, connect=10.0),
+            )
 
-        # Individual search results
-        results = data.get("results", [])
-        if results:
-            parts.append("搜索结果:")
-            for i, r in enumerate(results[:max_results], 1):
-                title = r.get("title", "")[:100]
-                content = r.get("content", "")[:200]
-                url = r.get("url", "")
-                parts.append(f"  [{i}] {title}")
-                parts.append(f"      {content}")
-                if url:
-                    parts.append(f"      URL: {url}")
+            if resp.status_code != 200:
+                last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                logger.warning(f"Tavily attempt {attempt+1}: {last_error}")
+                if attempt == 0:
+                    await asyncio.sleep(1.0)
+                continue
 
-        if not parts:
-            return ""
+            data = resp.json()
 
-        return "\n".join(parts)
+            # Check for API-level errors
+            if data.get("error"):
+                last_error = f"API error: {data['error']}"
+                logger.warning(f"Tavily attempt {attempt+1}: {last_error}")
+                if attempt == 0:
+                    await asyncio.sleep(1.0)
+                continue
 
-    except Exception as e:
-        logger.warning(f"Tavily search failed: {e}")
-        return ""
+            parts = []
+
+            answer = data.get("answer", "")
+            if answer:
+                parts.append(f"摘要: {answer}")
+
+            results = data.get("results", [])
+            if results:
+                parts.append("搜索结果:")
+                for i, r in enumerate(results[:max_results], 1):
+                    title = r.get("title", "")[:100]
+                    content = r.get("content", "")[:200]
+                    url = r.get("url", "")
+                    parts.append(f"  [{i}] {title}")
+                    parts.append(f"      {content}")
+                    if url:
+                        parts.append(f"      URL: {url}")
+
+            if not parts:
+                return ""
+
+            formatted = "\n".join(parts)
+
+            # Cache for 120s to save quota on repeat queries
+            _tavily_cache[cache_key] = (time.time() + 120, formatted)
+            if len(_tavily_cache) > 200:
+                oldest = min(_tavily_cache, key=lambda k: _tavily_cache[k][0])
+                del _tavily_cache[oldest]
+
+            return formatted
+
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"Tavily attempt {attempt+1} exception: {e}")
+            if attempt == 0:
+                await asyncio.sleep(1.0)
+
+    logger.error(f"Tavily search failed after 2 attempts: {last_error}")
+    return ""
 
 
 def _verify_and_parse(
@@ -192,13 +236,32 @@ def _verify_and_parse(
     try:
         parsed = json.loads(json_str)
     except json.JSONDecodeError:
-        # Try to find JSON object in the text
-        m = re.search(r'\{[^{}]*"question"\s*:\s*"[^"]*"[^{}]*\}', raw_response, re.DOTALL)
-        if m:
-            try:
-                parsed = json.loads(m.group())
-            except json.JSONDecodeError:
-                pass
+        # Try to find outermost JSON object with brace matching
+        if json_str.startswith("{") or "{" in json_str:
+            start = json_str.index("{")
+            depth = 0
+            end = -1
+            for i, ch in enumerate(json_str[start:], start):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            if end > start:
+                try:
+                    parsed = json.loads(json_str[start:end])
+                except json.JSONDecodeError:
+                    pass
+        # Fallback: simple regex
+        if not parsed:
+            m = re.search(r'\{[^{}]*"question"\s*:\s*"[^"]*"[^{}]*\}', raw_response, re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group())
+                except json.JSONDecodeError:
+                    pass
 
     if not parsed or not isinstance(parsed, dict):
         logger.warning(f"AI JSON parse failed, raw: {raw_response[:200]}")
@@ -252,6 +315,23 @@ def _verify_and_parse(
     }
 
 
+def _extract_stock_codes(msg: str) -> list[str]:
+    """Extract A-share stock codes from user message. Returns unique codes."""
+    # Match patterns: 600519, sh600519, sz000001, 000001
+    codes = []
+    # Full codes with optional exchange prefix
+    for m in re.finditer(r'\b(sh|sz)?(\d{6})\b', msg, re.IGNORECASE):
+        codes.append(m.group(2))
+    # Dedup preserving order
+    seen = set()
+    unique = []
+    for c in codes:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return unique[:8]  # Max 8 codes to avoid excessive API calls
+
+
 async def _fetch_market_context(
     user_message: str, positions: list[dict],
 ) -> str:
@@ -264,10 +344,17 @@ async def _fetch_market_context(
     is_market = _is_factual_question(user_message)
     has_positions = bool(positions)
 
+    # Extract stock codes from the message itself
+    msg_codes = _extract_stock_codes(user_message) if is_market else []
+
     if not is_market and not has_positions:
         return ""
 
-    # Fetch concurrently with asyncio.gather
+    # Collect all codes to fetch: positions + extracted from message
+    pos_codes = [p.get("asset_code", "") for p in positions if p.get("asset_code")]
+    all_codes = list(dict.fromkeys(pos_codes + msg_codes))  # dedup, preserve order
+
+    # Fetch concurrently
     tasks = []
     task_labels = []
     if is_market:
@@ -277,11 +364,9 @@ async def _fetch_market_context(
         task_labels.append("sectors")
         tasks.append(fetch_hot_rank(8))
         task_labels.append("hot")
-    if has_positions:
-        codes = [p.get("asset_code", "") for p in positions if p.get("asset_code")]
-        if codes:
-            tasks.append(get_batch_quotes(codes))
-            task_labels.append("quotes")
+    if all_codes:
+        tasks.append(get_batch_quotes(all_codes))
+        task_labels.append("quotes")
 
     if not tasks:
         return ""
@@ -307,7 +392,7 @@ async def _fetch_market_context(
         )
 
     if quotes:
-        parts.append("---用户持仓实时行情---")
+        parts.append("---实时个股行情---")
         for q in quotes:
             chg = q.get("change_pct", 0)
             sign = "+" if chg >= 0 else ""
