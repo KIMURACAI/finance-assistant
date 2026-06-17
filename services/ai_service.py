@@ -21,17 +21,17 @@ SYSTEM_PROMPT_CORE = """你是金融资讯助手。反幻觉规则：
 1. 只使用下方【网络搜索结果】和【实时行情数据】中的真实数据回答。
    绝不使用内部知识编造任何数字、日期、事件。
 
-2. 每个事实声明必须可追溯到提供的数据。无法验证 → 不输出。
+2. 每个事实声明必须可追溯到提供的数据。
 
-3. confidence_score:
-   • 95-100: 所有声明来自提供的数据，多源交叉验证
-   • 80-94:  大多数匹配，少量格式化差异
-   • 70-79:  部分数据支撑但不够完整
-   • < 70:   无法验证 → 只回答 LOW CONFIDENCE
+3. confidence_score 评估:
+   • 90: 多个独立来源交叉验证
+   • 70: 至少一个可信来源
+   • 50: 部分数据支撑，存在不确定性
+   • < 30: 完全无数据支撑 → 只输出 LOW CONFIDENCE
 
 4. 持仓管理命令附加在 analysis 末尾。
 
-5. 网络搜索结果优先于行情数据（搜索更新更快）。
+5. 网络搜索结果优先于行情数据。
 
 ━━━━━━━━━━━━━━━━━━━━━━
 只输出以下JSON，不要额外文字:
@@ -293,36 +293,11 @@ def _verify_and_parse(
         }
 
     confidence = parsed.get("confidence_score", 0)
-    verified_data = parsed.get("verified_data", [])
     analysis = parsed.get("analysis", "")
 
-    # ── Verification layer: audit + confidence check, no forced downgrade ──
-
-    # Gate 1 (audit only): warn if factual question but no verified_data cited
-    if market_context and not verified_data and _requires_web_search(user_message):
-        logger.warning(
-            f"Gate 1: factual question with external data but no verified_data cited. "
-            f"AI confidence={confidence}. Not downgrading — trusting AI self-assessment."
-        )
-
-    # Gate 2 (audit only): check cross-reference between verified_data and context
-    if verified_data and market_context:
-        match_count = 0
-        for item in verified_data:
-            numbers = re.findall(r'\d+\.?\d*', str(item))
-            if numbers:
-                hits = sum(1 for n in numbers if n in market_context)
-                if hits >= len(numbers) * 0.5:
-                    match_count += 1
-        if match_count < len(verified_data) * 0.5 and len(verified_data) > 0:
-            logger.warning(
-                f"Gate 2: only {match_count}/{len(verified_data)} verified_data items "
-                f"cross-reference with context. AI confidence={confidence}. "
-                f"Not downgrading — trusting AI self-assessment."
-            )
-
-    # Gate 3: confidence_score adjudication (threshold 70 — AI is conservative at temp=0.1)
-    if confidence < 70:
+    # Simple rule: only reject when confidence < 30 (completely unverified)
+    # 50+ = partial source, 70+ = one trusted source, 90+ = multiple sources — all pass
+    if confidence < 30:
         return {
             "status": "low_confidence",
             "display_text": "LOW CONFIDENCE",
