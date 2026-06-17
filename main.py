@@ -223,6 +223,21 @@ async def test_deepseek():
     }
 
 
+@app.get("/test/wechat-token")
+async def test_wechat_token():
+    """Test WeChat access token retrieval."""
+    from wechat.official_account import _get_access_token
+    t0 = __import__("time").time()
+    token = await _get_access_token()
+    t = round(__import__("time").time() - t0, 2)
+    return {
+        "ok": bool(token),
+        "token_prefix": token[:10] + "..." if token else "",
+        "token_len": len(token),
+        "time": t,
+    }
+
+
 @app.get("/test/ai-flow")
 async def test_ai_flow(msg: str = "你好"):
     """End-to-end test: local command + AI + WeChat push."""
