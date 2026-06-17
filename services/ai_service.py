@@ -16,26 +16,35 @@ from core import get_client, retry, market_cache
 API_URL = f"{settings.DEEPSEEK_BASE_URL}/chat/completions"
 
 
-SYSTEM_PROMPT_CORE = """你是一个金融资讯助手。规则：
-1. 回答简洁但完整，普通查询 ≤ 500字，行情分析可适当展开
-2. 管理持仓：用户要求添加/删除时，回复末尾附加JSON命令
-3. 禁止投资建议，只做信息整理
-4. 必须使用下方【实时行情数据】中的真实数字，不要编造任何价格、涨跌幅
-5. 如果实时数据为"暂无"，据实告知用户暂无数据
+SYSTEM_PROMPT_CORE = """你是金融资讯助手。严格执行以下反幻觉规则（ANTI-HALLUCINATION POLICY）：
 
-持仓命令格式：
-```json
-{"cmd":"add_position","asset_code":"600519","asset_name":"贵州茅台","asset_type":"stock","market":"A","weight":10}
-```
-```json
-{"cmd":"remove_position","asset_code":"600519","market":"A"}
-```
-```json
-{"cmd":"list_positions"}
-```
-```json
-{"cmd":"update_preference","industry_focus":"新能源"}
-```"""
+━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL RULES — VIOLATION = FAILURE
+━━━━━━━━━━━━━━━━━━━━━━
+
+1. NEVER answer factual/data questions from internal knowledge.
+   You MUST only use data from the 【实时行情数据】 section below.
+   If the section is empty or absent for a factual question → output DATA NOT AVAILABLE.
+
+2. Every number (price, change%, volume, index) in your response MUST
+   appear verbatim in 【实时行情数据】. No rounding, no estimation.
+
+3. Before writing analysis, verify each factual claim against the data.
+   If a claim cannot be verified → do NOT include it.
+
+4. confidence_score rules:
+   • 95-100: all numbers verbatim from 【实时行情数据】
+   • 80-94:  most numbers match, minor reformatting
+   • < 80:   any unverifiable statement → respond LOW CONFIDENCE only
+   • 0:      no data available for this question
+
+5. Position management commands go inside the analysis field as add/remove JSON blocks.
+
+━━━━━━━━━━━━━━━━━━━━━━
+MANDATORY OUTPUT FORMAT (strict JSON, no markdown, no extra text)
+━━━━━━━━━━━━━━━━━━━━━━
+
+{"question":"<user question>","verified_data":["<each data point used, quoting from 【实时行情数据】>"],"analysis":"<analysis using ONLY verified data. For greetings/small-talk, reply naturally here. For position commands, append ```json {{\"cmd\":...}}``` at end>","confidence_score":<0-100>,"sources":["<data source names>"]}"""
 
 
 def _make_cache_key(user_message: str, positions_hash: str, history_tail: str) -> str:
@@ -89,17 +98,99 @@ def _build_system_prompt(positions: list[dict], preferences: dict) -> str:
     return prompt
 
 
-def _is_market_query(msg: str) -> bool:
-    """Check if user message is asking about markets / prices."""
-    market_kw = [
+def _is_factual_question(msg: str) -> bool:
+    """Detect questions that require external data — must NOT be answered from model memory."""
+    factual_kw = [
         "行情", "大盘", "指数", "上证", "深证", "创业板", "走势",
-        "涨跌", "涨停", "跌停", "涨幅", "热门", "板块", "行业",
-        "股票", "股价", "价格", "多少", "怎样", "如何", "最新",
-        "实时", "今天", "今日", "目前", "现在", "分析", "龙虎",
-        "热点", "概念", "北向", "成交", "市值", "PE", "估值",
+        "涨跌", "涨停", "跌停", "涨幅", "跌幅", "热门", "板块", "行业",
+        "股票", "股价", "价格", "多少", "多少点", "最新", "现在",
+        "实时", "今天", "今日", "目前", "分析", "预测", "建议",
+        "龙虎", "热点", "概念", "北向", "成交", "市值", "PE", "估值",
+        "基金", "净值", "收益", "财报", "业绩", "公告", "新闻",
+        "代码", "查", "查询", "帮我", "能否", "是否", "怎样",
+        "怎么样", "如何", "怎么看", "评价", "评级",
     ]
     msg_lower = msg.lower()
-    return any(kw in msg_lower for kw in market_kw) or len(msg.strip()) <= 8
+    # Short codes like "600519" are factual queries
+    if len(msg.strip()) <= 8 and any(c.isdigit() for c in msg):
+        return True
+    return any(kw in msg_lower for kw in factual_kw)
+
+
+def _verify_and_parse(
+    raw_response: str, market_context: str, user_message: str
+) -> dict:
+    """
+    Parse AI JSON response and verify factual claims against market data.
+    Returns {"status": "ok"|"no_data"|"low_confidence"|"parse_error", "display_text": str, "raw": dict}
+    """
+    # Try to extract JSON from response
+    json_str = raw_response.strip()
+
+    # Strip markdown code fences if present
+    if json_str.startswith("```"):
+        json_str = re.sub(r'^```(?:json)?\s*', '', json_str)
+        json_str = re.sub(r'\s*```$', '', json_str)
+
+    parsed = None
+    try:
+        parsed = json.loads(json_str)
+    except json.JSONDecodeError:
+        # Try to find JSON object in the text
+        m = re.search(r'\{[^{}]*"question"\s*:\s*"[^"]*"[^{}]*\}', raw_response, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group())
+            except json.JSONDecodeError:
+                pass
+
+    if not parsed or not isinstance(parsed, dict):
+        logger.warning(f"AI JSON parse failed, raw: {raw_response[:200]}")
+        return {
+            "status": "parse_error",
+            "display_text": raw_response[:500],
+            "raw": {},
+        }
+
+    confidence = parsed.get("confidence_score", 0)
+    verified_data = parsed.get("verified_data", [])
+    analysis = parsed.get("analysis", "")
+
+    # Gate 1: If market context exists but AI didn't cite any verified data → suspicious
+    if market_context and not verified_data and _is_factual_question(user_message):
+        logger.warning(f"Factual question with market data but no verified_data cited. confidence={confidence}")
+        # Force low confidence
+        if confidence >= 80:
+            confidence = 70
+
+    # Gate 2: Check each verified_data item against market context
+    if verified_data and market_context:
+        match_count = 0
+        for item in verified_data:
+            # Check if key numbers from the item appear in market context
+            numbers = re.findall(r'\d+\.?\d*', str(item))
+            if numbers:
+                hits = sum(1 for n in numbers if n in market_context)
+                if hits >= len(numbers) * 0.5:  # at least 50% of numbers match
+                    match_count += 1
+        if match_count < len(verified_data) * 0.5 and len(verified_data) > 0:
+            logger.warning(f"Verification failed: only {match_count}/{len(verified_data)} items match market data")
+            if confidence >= 80:
+                confidence = min(confidence, 70)
+
+    # Gate 3: confidence_score adjudication
+    if confidence < 80:
+        return {
+            "status": "low_confidence",
+            "display_text": "LOW CONFIDENCE",
+            "raw": parsed,
+        }
+
+    return {
+        "status": "ok",
+        "display_text": analysis if analysis else raw_response,
+        "raw": parsed,
+    }
 
 
 async def _fetch_market_context(
@@ -111,7 +202,7 @@ async def _fetch_market_context(
         get_batch_quotes, fetch_hot_rank,
     )
 
-    is_market = _is_market_query(user_message)
+    is_market = _is_factual_question(user_message)
     has_positions = bool(positions)
 
     if not is_market and not has_positions:
@@ -192,39 +283,56 @@ async def chat(
     preferences: dict,
     chat_history: list[dict],
 ) -> str:
-    """AI chat with caching + prompt compression."""
+    """AI chat with strict anti-hallucination: data-first, verify, structured output."""
     pos_hash = hashlib.md5(str(positions).encode()).hexdigest()[:8]
     history_tail = str(chat_history[-4:]) if chat_history else ""
+    is_factual = _is_factual_question(user_message)
 
-    if len(user_message) < 50 and not any(kw in user_message for kw in ["添加", "删除", "持仓"]):
+    # ── Cache check (skip for factual — data changes) ──
+    if not is_factual and len(user_message) < 50 and not any(
+        kw in user_message for kw in ["添加", "删除", "持仓"]
+    ):
         cache_key = _make_cache_key(user_message, pos_hash, "")
         cached = _get_cached(cache_key)
         if cached:
             return cached
 
+    # ── Build system prompt ──
     system_prompt = _build_system_prompt(positions, preferences)
     compressed_history = _compress_history(chat_history)
 
-    # Inject real-time market data so AI uses actual numbers
+    # ── Fetch real-time market data ──
     market_ctx = await _fetch_market_context(user_message, positions)
     if market_ctx:
         system_prompt += "\n\n" + market_ctx
 
+    # ── Anti-hallucination Gate: factual question without data → DATA NOT AVAILABLE ──
+    if is_factual and not market_ctx:
+        logger.info(f"Factual question but no market data available: {user_message[:50]}")
+        return "DATA NOT AVAILABLE"
+
+    # ── Build messages ──
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(compressed_history)
     messages.append({"role": "user", "content": user_message})
 
+    # ── Call AI with temperature clamped to 0.1 (anti-hallucination) ──
     payload = {
         "model": settings.DEEPSEEK_MODEL,
         "messages": messages,
-        "temperature": settings.DEEPSEEK_TEMPERATURE,
+        "temperature": 0.1,  # Hard override for strict factual adherence
         "max_tokens": settings.DEEPSEEK_MAX_TOKENS,
     }
 
     client = get_client()
-    for attempt in range(2):  # Try twice
+    raw_content = None
+    for attempt in range(2):
         try:
-            logger.info(f"DeepSeek API 请求 attempt={attempt+1} model={settings.DEEPSEEK_MODEL} msg_len={len(user_message)}")
+            logger.info(
+                f"DeepSeek API request attempt={attempt+1} "
+                f"model={settings.DEEPSEEK_MODEL} msg_len={len(user_message)} "
+                f"is_factual={is_factual} has_market_data={bool(market_ctx)}"
+            )
             resp = await client.post(
                 API_URL,
                 headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
@@ -233,16 +341,44 @@ async def chat(
             )
             resp.raise_for_status()
             data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            if len(user_message) < 50 and len(content) < 300:
-                _set_cache(_make_cache_key(user_message, pos_hash, ""), content)
-            return content
+            raw_content = data["choices"][0]["message"]["content"]
+            break
         except Exception as e:
             logger.warning(f"AI attempt {attempt+1} failed: {e}")
             if attempt == 0:
                 await asyncio.sleep(1.5)
 
-    return _get_fallback_reply(user_message)
+    if raw_content is None:
+        return _get_fallback_reply(user_message)
+
+    # ── Verification layer ──
+    verified = _verify_and_parse(raw_content, market_ctx, user_message)
+
+    if verified["status"] == "low_confidence":
+        logger.warning(
+            f"LOW CONFIDENCE: user={user_message[:50]} "
+            f"confidence={verified['raw'].get('confidence_score', 'N/A')}"
+        )
+        return "LOW CONFIDENCE"
+
+    if verified["status"] == "parse_error":
+        # JSON parse failed — still return raw text but log warning
+        logger.warning(f"AI did not output valid JSON, returning raw text")
+        return verified["display_text"]
+
+    # ── Log structured output for audit ──
+    logger.info(
+        f"AI verified OK: confidence={verified['raw'].get('confidence_score')} "
+        f"verified_data_count={len(verified['raw'].get('verified_data', []))}"
+    )
+
+    display = verified["display_text"]
+
+    # ── Cache non-factual short responses ──
+    if not is_factual and len(user_message) < 50 and len(display) < 300:
+        _set_cache(_make_cache_key(user_message, pos_hash, ""), display)
+
+    return display
 
 
 @retry(max_retries=2, base_delay=1.0)
