@@ -135,6 +135,52 @@ def _build_system_prompt(positions: list[dict], preferences: dict) -> str:
     return prompt
 
 
+def _check_ambiguous(msg: str) -> str:
+    """Detect ambiguous questions. Returns clarification text or empty string.
+
+    Intercepts BEFORE any tools or model calls. No API waste on vague queries.
+    """
+    # Must match a vague pattern
+    vague_patterns = [
+        r'怎么样\s*$', r'怎么样\?', r'如何\s*$', r'如何\?',
+        r'好不好\s*$', r'好不好\?', r'行不行', r'能不能买',
+        r'能买吗', r'值得买吗', r'可以买吗',
+        r'分析一下\s*$',
+    ]
+    is_vague = False
+    for pat in vague_patterns:
+        if re.search(pat, msg):
+            is_vague = True
+            break
+
+    if not is_vague:
+        return ""
+
+    # Vague question about a BROAD category (not a specific stock)
+    broad_categories = [
+        "新能源", "科技", "半导体", "医药", "消费", "金融", "地产",
+        "军工", "农业", "白酒", "汽车", "互联网", "AI", "人工智能",
+        "区块链", "元宇宙", "光伏", "储能", "锂电", "风电",
+        "黄金", "原油", "大宗商品", "外汇", "债券", "基金",
+        "股票", "A股", "港股", "美股", "板块", "赛道",
+    ]
+    has_broad = any(cat in msg for cat in broad_categories)
+
+    # Has a specific stock code? If yes, it's not vague
+    has_stock_code = bool(re.search(r'\b\d{6}\b', msg))
+
+    if has_broad and not has_stock_code:
+        return (
+            f"您想了解「{msg.strip()}」的哪个方面？\n"
+            "① 投资价值与机会\n"
+            "② 行业趋势与前景\n"
+            "③ 具体标的推荐\n"
+            "请回复数字，我为您详细分析。"
+        )
+
+    return ""
+
+
 def _classify_question(msg: str) -> str:
     """Router: classify user question into 4 categories.
 
@@ -606,6 +652,11 @@ async def chat(
       3. Call model for text generation ONLY
     """
     pos_hash = hashlib.md5(str(positions).encode()).hexdigest()[:8]
+
+    # ── Ambiguity intercept (code-level, before any tools or model) ──
+    clarification = _check_ambiguous(user_message)
+    if clarification:
+        return clarification
 
     # ── STEP 1: Route & execute tools (CODE decision, model not involved) ──
     tools = await route_and_execute_tools(user_message, positions)
