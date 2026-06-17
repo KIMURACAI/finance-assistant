@@ -5,6 +5,7 @@ import json
 import hashlib
 import time
 import re
+import httpx
 from typing import Optional
 
 from loguru import logger
@@ -192,6 +193,7 @@ async def screen_news(
                 "temperature": 0.2,
                 "max_tokens": 500,
             },
+            timeout=httpx.Timeout(30.0, connect=20.0),
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]

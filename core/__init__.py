@@ -1,4 +1,4 @@
-"""Shared HTTP client with connection pooling + retry + circuit breaker."""
+"""Core shared utilities."""
 
 import asyncio
 import time
@@ -8,30 +8,22 @@ from functools import wraps
 import httpx
 from loguru import logger
 
-from config import settings
-
-# ─── Shared Client Pool ────────────────────────────────
+# ─── Shared Client ─────────────────────────────
 _client: Optional[httpx.AsyncClient] = None
 
 
 def get_client() -> httpx.AsyncClient:
     global _client
+
     if _client is None or _client.is_closed:
-        limits = httpx.Limits(
-            max_keepalive_connections=20,
-            max_connections=100,
-            keepalive_expiry=30.0,
-        )
-        timeout = httpx.Timeout(15.0, connect=10.0)
         _client = httpx.AsyncClient(
-            limits=limits,
-            timeout=timeout,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "*/*",
-                "Accept-Language": "zh-CN,zh;q=0.9",
-            },
+            timeout=20.0,
+            limits=httpx.Limits(
+                max_keepalive_connections=20,
+                max_connections=100
+            )
         )
+
     return _client
 
 
@@ -41,61 +33,47 @@ async def close_client():
         await _client.aclose()
 
 
-# ─── Retry Decorator ───────────────────────────────────
-def retry(max_retries: int = 3, base_delay: float = 0.5, backoff: float = 2.0):
-    """Exponential backoff retry."""
+# ─── Retry Decorator ──────────────────────────
+def retry(max_retries=3, base_delay=1):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            last_error = None
-            for attempt in range(max_retries):
+            last = None
+
+            for i in range(max_retries):
                 try:
                     return await func(*args, **kwargs)
-                except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError,
-                        httpx.HTTPStatusError) as e:
-                    last_error = e
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (backoff ** attempt)
-                        logger.warning(f"Retry {attempt+1}/{max_retries} after {delay:.1f}s: {e}")
-                        await asyncio.sleep(delay)
-                    else:
-                        logger.error(f"All {max_retries} retries failed: {e}")
-            raise last_error
+                except Exception as e:
+                    last = e
+                    logger.warning(f"retry {i+1}: {e}")
+                    await asyncio.sleep(base_delay)
+
+            raise last
+
         return wrapper
+
     return decorator
 
 
-# ─── Simple TTL Cache ──────────────────────────────────
+# ─── Cache ────────────────────────────────────
 class TTLCache:
-    """Thread-safe TTL cache with max size."""
 
-    def __init__(self, ttl_seconds: int = 300, max_size: int = 100):
-        self._ttl = ttl_seconds
-        self._max_size = max_size
-        self._cache: dict[str, tuple[float, object]] = {}
+    def __init__(self, ttl_seconds=300):
+        self.ttl = ttl_seconds
+        self.cache = {}
 
-    def get(self, key: str):
-        if key in self._cache:
-            expires, value = self._cache[key]
-            if time.time() < expires:
+    def get(self, key):
+        if key in self.cache:
+            exp, value = self.cache[key]
+            if time.time() < exp:
                 return value
-            del self._cache[key]
+            del self.cache[key]
         return None
 
-    def set(self, key: str, value: object, ttl: Optional[int] = None):
-        if len(self._cache) >= self._max_size:
-            self._evict()
-        self._cache[key] = (time.time() + (ttl or self._ttl), value)
-
-    def _evict(self):
-        oldest = min(self._cache.keys(), key=lambda k: self._cache[k][0])
-        del self._cache[oldest]
-
-    def clear(self):
-        self._cache.clear()
+    def set(self, key, value, ttl=None):
+        self.cache[key] = (time.time() + (ttl or self.ttl), value)
 
 
-# Global cache instances
-market_cache = TTLCache(ttl_seconds=120)     # 2 min for market data
-news_cache = TTLCache(ttl_seconds=300)       # 5 min for news
-wechat_token_cache = TTLCache(ttl_seconds=6000)  # 100 min for token
+market_cache = TTLCache(120)
+news_cache = TTLCache(300)
+wechat_token_cache = TTLCache(6000)
