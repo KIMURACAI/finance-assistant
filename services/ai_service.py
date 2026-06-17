@@ -20,7 +20,8 @@ SYSTEM_PROMPT_CORE = """你是一个金融资讯助手。规则：
 1. 回答简洁但完整，普通查询 ≤ 500字，行情分析可适当展开
 2. 管理持仓：用户要求添加/删除时，回复末尾附加JSON命令
 3. 禁止投资建议，只做信息整理
-4. 数据不确定时说"暂无确认数据"
+4. 必须使用下方【实时行情数据】中的真实数字，不要编造任何价格、涨跌幅
+5. 如果实时数据为"暂无"，据实告知用户暂无数据
 
 持仓命令格式：
 ```json
@@ -88,6 +89,103 @@ def _build_system_prompt(positions: list[dict], preferences: dict) -> str:
     return prompt
 
 
+def _is_market_query(msg: str) -> bool:
+    """Check if user message is asking about markets / prices."""
+    market_kw = [
+        "行情", "大盘", "指数", "上证", "深证", "创业板", "走势",
+        "涨跌", "涨停", "跌停", "涨幅", "热门", "板块", "行业",
+        "股票", "股价", "价格", "多少", "怎样", "如何", "最新",
+        "实时", "今天", "今日", "目前", "现在", "分析", "龙虎",
+        "热点", "概念", "北向", "成交", "市值", "PE", "估值",
+    ]
+    msg_lower = msg.lower()
+    return any(kw in msg_lower for kw in market_kw) or len(msg.strip()) <= 8
+
+
+async def _fetch_market_context(
+    user_message: str, positions: list[dict],
+) -> str:
+    """Fetch real-time market data and format for AI context."""
+    from services.market_service import (
+        get_market_overview, get_sector_performance,
+        get_batch_quotes, fetch_hot_rank,
+    )
+
+    is_market = _is_market_query(user_message)
+    has_positions = bool(positions)
+
+    if not is_market and not has_positions:
+        return ""
+
+    # Fetch concurrently with asyncio.gather
+    tasks = []
+    task_labels = []
+    if is_market:
+        tasks.append(get_market_overview())
+        task_labels.append("overview")
+        tasks.append(get_sector_performance())
+        task_labels.append("sectors")
+        tasks.append(fetch_hot_rank(8))
+        task_labels.append("hot")
+    if has_positions:
+        codes = [p.get("asset_code", "") for p in positions if p.get("asset_code")]
+        if codes:
+            tasks.append(get_batch_quotes(codes))
+            task_labels.append("quotes")
+
+    if not tasks:
+        return ""
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    data = dict(zip(task_labels, results))
+
+    overview = data.get("overview") if not isinstance(data.get("overview"), Exception) else None
+    sectors = data.get("sectors") if not isinstance(data.get("sectors"), Exception) else None
+    hot = data.get("hot") if not isinstance(data.get("hot"), Exception) else None
+    quotes = data.get("quotes") if not isinstance(data.get("quotes"), Exception) else None
+
+    if not any([overview, sectors, hot, quotes]):
+        return ""
+
+    parts = ["【实时行情数据 - 必须使用以下真实数字】"]
+
+    if overview:
+        icon = "🔴" if overview.get("change_pct", 0) < 0 else "🟢"
+        parts.append(
+            f"{icon} {overview['index_name']}: {overview['price']:.2f}  "
+            f"涨跌: {overview['change_pct']:+.2f}%"
+        )
+
+    if quotes:
+        parts.append("---用户持仓实时行情---")
+        for q in quotes:
+            chg = q.get("change_pct", 0)
+            sign = "+" if chg >= 0 else ""
+            parts.append(
+                f"  {q.get('name', q.get('code', ''))}({q.get('code', '')}): "
+                f"最新价 {q.get('price', 0):.2f}  涨跌 {sign}{chg:.2f}%"
+            )
+
+    if sectors:
+        parts.append("---热门板块---")
+        for s in sectors[:6]:
+            chg = s.get("change_pct", 0)
+            sign = "+" if chg >= 0 else ""
+            parts.append(f"  {s.get('name', '')}: {sign}{chg:.2f}%")
+
+    if hot:
+        parts.append("---今日热门个股---")
+        for s in hot[:5]:
+            chg = s.get("change_pct", 0)
+            sign = "+" if chg >= 0 else ""
+            parts.append(
+                f"  {s.get('name', '')}({s.get('code', '')}): "
+                f"{s.get('price', 0)} ({sign}{chg:.2f}%)"
+            )
+
+    return "\n".join(parts)
+
+
 async def chat(
     user_message: str,
     positions: list[dict],
@@ -106,6 +204,11 @@ async def chat(
 
     system_prompt = _build_system_prompt(positions, preferences)
     compressed_history = _compress_history(chat_history)
+
+    # Inject real-time market data so AI uses actual numbers
+    market_ctx = await _fetch_market_context(user_message, positions)
+    if market_ctx:
+        system_prompt += "\n\n" + market_ctx
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(compressed_history)
