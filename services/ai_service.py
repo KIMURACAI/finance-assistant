@@ -103,109 +103,175 @@ def _build_system_prompt(positions: list[dict], preferences: dict) -> str:
     return prompt
 
 
-def _requires_web_search(msg: str) -> bool:
-    """Routing layer: detect questions that benefit from realtime web data.
+def _classify_question(msg: str) -> str:
+    """Router: classify user question into 4 categories.
 
-    Returns True → triggers search. If search fails, AI answers with
-    available data + hedging — never blocks the user.
+    CODE decides — model has ZERO input on routing.
+
+    Returns one of:
+      "datetime"   — date/time → Python datetime, never search
+      "realtime"   — news/price/events → force web search
+      "financial"  — PE/earnings/reports → call financial APIs
+      "knowledge"  — definitions/concepts → normal model response
     """
-    realtime_keywords = [
-        # Time-sensitive
-        "today", "today's", "latest", "recent", "current", "update",
-        "今天", "今日", "最新", "最近", "目前", "现在", "当前",
-        # Financial instruments
-        "price", "stock", "market", "gold", "bitcoin", "crypto",
-        "股价", "价格", "股票", "行情", "黄金", "比特币",
-        # Market data
-        "index", "nasdaq", "dow", "s&p", "hang seng", "nikkei",
-        "指数", "上证", "深证", "创业板", "恒生", "纳斯达克",
-        # News & events
-        "news", "announced", "reported", "earnings", "dividend",
-        "新闻", "公告", "财报", "业绩", "分红",
-        # Policy & macro
-        "policy", "fed", "interest rate", "inflation", "gdp",
-        "政策", "利率", "央行", "通胀", "GDP",
-        # Sectors & companies
-        "company", "technology", "tech", "sector", "industry",
-        "公司", "科技", "板块", "行业", "概念",
-        # General realtime
-        "weather", "website",
-        # Analysis requests
-        "分析", "预测", "建议", "怎么看", "怎么样", "如何",
-        # Stock code patterns (6-digit A-share codes)
-    ]
     msg_lower = msg.lower()
 
-    # Check keyword matches
-    for kw in realtime_keywords:
+    # ── Category 1: Date / Time ──
+    datetime_kw = [
+        "what date", "what time", "what day", "today's date",
+        "今天几号", "今天日期", "现在几点", "现在时间", "今天星期几",
+        "几月几号", "今天是什么日子", "当前时间", "当前日期",
+        "what is the date", "what is today", "current time",
+    ]
+    for kw in datetime_kw:
         if kw.lower() in msg_lower:
-            return True
+            return "datetime"
 
-    # Check for stock code patterns (6-digit number)
+    # ── Category 3: Financial data (PE, earnings, reports) ──
+    financial_kw = [
+        "pe ratio", "p/e", "市盈率", "市净率", "pb ratio", "p/b",
+        "earnings", "eps", "每股收益", "revenue", "营收",
+        "market cap", "市值", "dividend yield", "股息率",
+        "roe", "净资产收益率", "roa", "总资产收益率",
+        "profit margin", "净利润", "毛利率", "net income",
+        "balance sheet", "资产负债表", "cash flow", "现金流",
+        "financial report", "财报", "年报", "季报", "quarterly",
+        "debt to equity", "资产负债率", "current ratio",
+        "book value", "每股净资产", "peg ratio", "peg",
+    ]
+    for kw in financial_kw:
+        if kw.lower() in msg_lower:
+            return "financial"
+
+    # ── Category 2: Realtime information ──
+    realtime_kw = [
+        "today", "today's", "latest", "recent", "current", "update",
+        "今天", "今日", "最新", "最近", "目前", "现在", "当前",
+        "price", "stock", "market", "gold", "bitcoin", "crypto",
+        "股价", "价格", "股票", "行情", "黄金", "比特币",
+        "index", "nasdaq", "dow", "s&p", "hang seng", "nikkei",
+        "指数", "上证", "深证", "创业板", "恒生", "纳斯达克",
+        "news", "announced", "reported", "dividend",
+        "新闻", "公告", "业绩", "分红",
+        "policy", "fed", "interest rate", "inflation", "gdp",
+        "政策", "利率", "央行", "通胀", "GDP",
+        "company", "technology", "tech", "sector", "industry",
+        "公司", "科技", "板块", "行业", "概念",
+        "weather", "website",
+        "分析", "预测", "建议", "怎么看", "怎么样", "如何",
+    ]
+    for kw in realtime_kw:
+        if kw.lower() in msg_lower:
+            return "realtime"
+
+    # Stock code pattern = realtime
     if re.search(r'\b\d{6}\b', msg):
-        return True
+        return "realtime"
 
-    return False
+    # ── Category 4: Knowledge (default) ──
+    return "knowledge"
+
+
+def _get_datetime_context() -> str:
+    """Return current date/time info for injection into prompt."""
+    from datetime import datetime, timezone, timedelta
+
+    # China timezone (UTC+8)
+    tz_cn = timezone(timedelta(hours=8))
+    now = datetime.now(tz_cn)
+
+    weekday_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    return (
+        f"【当前日期时间 - 代码获取，绝对准确】\n"
+        f"日期: {now.strftime('%Y年%m月%d日')} {weekday_cn[now.weekday()]}\n"
+        f"时间: {now.strftime('%H:%M:%S')} (北京时间 UTC+8)\n"
+        f"ISO: {now.strftime('%Y-%m-%dT%H:%M:%S+08:00')}"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
-# TOOL EXECUTION ROUTER — code decides, model has ZERO control
+# TOOL EXECUTION ROUTER — code classifies, code decides, model receives
 # ═══════════════════════════════════════════════════════════════
-# The router runs BEFORE the model. The model receives results,
-# never decides whether tools are needed.
+
 
 async def route_and_execute_tools(
     user_message: str, positions: list[dict],
 ) -> dict:
-    """Router: decide which tools to run, execute them, return results.
+    """Router: classify question → execute correct tools → return data.
 
-    This is a CODE-ONLY decision. The model has NO input on whether
-    tools are executed. The model only sees the results.
+    Categories (CODE decision, NOT model):
+      1. datetime  → Python datetime, never search
+      2. realtime  → force Tavily + market data
+      3. financial → financial APIs + market data
+      4. knowledge → no tools, model answers directly
 
-    Returns:
-        {"search_ctx": str, "market_ctx": str, "needs_search": bool}
+    Returns: {"category": str, "search_ctx": str, "market_ctx": str, "system_note": str}
     """
-    needs_search = _requires_web_search(user_message)
+    category = _classify_question(user_message)
+    logger.info(f"Router classified [{user_message[:50]}] → {category}")
 
-    if not needs_search:
-        # Non-realtime: market data only, no web search
-        market_ctx = await _fetch_market_context(user_message, positions)
-        if isinstance(market_ctx, Exception):
-            market_ctx = ""
+    # ── Category 1: Date/Time ──
+    if category == "datetime":
+        dt_ctx = _get_datetime_context()
         return {
-            "search_ctx": "",
-            "market_ctx": market_ctx,
-            "needs_search": False,
+            "category": "datetime",
+            "search_ctx": dt_ctx,
+            "market_ctx": "",
+            "system_note": "",
         }
 
-    # Realtime: fetch market data + web search in parallel
-    market_task = _fetch_market_context(user_message, positions)
-    search_task = _tavily_search(user_message, max_results=5)
+    # ── Category 3: Financial data ──
+    if category == "financial":
+        market_task = _fetch_market_context(user_message, positions)
+        search_task = _tavily_search(user_message, max_results=5)
 
-    market_ctx, search_ctx = await asyncio.gather(
-        market_task, search_task, return_exceptions=True,
-    )
-    if isinstance(market_ctx, Exception):
-        logger.warning(f"Market fetch failed: {market_ctx}")
-        market_ctx = ""
-    if isinstance(search_ctx, Exception):
-        logger.warning(f"Tavily search exception: {search_ctx}")
-        search_ctx = ""
-
-    if not search_ctx:
-        logger.warning(
-            f"Search unavailable for: {user_message[:50]}. "
-            f"Proceeding with available data — model will hedge."
+        market_ctx, search_ctx = await asyncio.gather(
+            market_task, search_task, return_exceptions=True,
         )
-    else:
-        logger.info(
-            f"Search OK: query={user_message[:50]} result_len={len(search_ctx)}"
-        )
+        if isinstance(market_ctx, Exception):
+            market_ctx = ""
+        if isinstance(search_ctx, Exception):
+            search_ctx = ""
 
+        return {
+            "category": "financial",
+            "search_ctx": search_ctx,
+            "market_ctx": market_ctx,
+            "system_note": "注意: 财务数据应引用搜索结果和行情数据中的具体数字，不要编造。",
+        }
+
+    # ── Category 2: Realtime ──
+    if category == "realtime":
+        market_task = _fetch_market_context(user_message, positions)
+        search_task = _tavily_search(user_message, max_results=5)
+
+        market_ctx, search_ctx = await asyncio.gather(
+            market_task, search_task, return_exceptions=True,
+        )
+        if isinstance(market_ctx, Exception):
+            market_ctx = ""
+        if isinstance(search_ctx, Exception):
+            search_ctx = ""
+
+        if not search_ctx:
+            logger.warning(
+                f"Search unavailable for realtime: {user_message[:50]}. "
+                f"Model will hedge with available data."
+            )
+
+        return {
+            "category": "realtime",
+            "search_ctx": search_ctx,
+            "market_ctx": market_ctx,
+            "system_note": "" if search_ctx else "本次未获取到实时搜索数据，可以使用已有行情数据或基础知识回答，但不要编造具体数字。",
+        }
+
+    # ── Category 4: Knowledge (no tools) ──
     return {
-        "search_ctx": search_ctx,
-        "market_ctx": market_ctx,
-        "needs_search": True,
+        "category": "knowledge",
+        "search_ctx": "",
+        "market_ctx": "",
+        "system_note": "",
     }
 
 
@@ -414,7 +480,7 @@ async def _fetch_market_context(
         get_batch_quotes, fetch_hot_rank,
     )
 
-    is_market = _requires_web_search(user_message)
+    is_market = _classify_question(user_message) != "knowledge"
     has_positions = bool(positions)
 
     # Extract stock codes from the message itself
@@ -511,12 +577,13 @@ async def chat(
 
     # ── STEP 1: Route & execute tools (CODE decision, model not involved) ──
     tools = await route_and_execute_tools(user_message, positions)
+    category = tools["category"]
     search_ctx = tools["search_ctx"]
     market_ctx = tools["market_ctx"]
-    needs_search = tools["needs_search"]
+    system_note = tools["system_note"]
 
-    # ── Cache check (non-realtime only) ──
-    if not needs_search and not search_ctx and len(user_message) < 50:
+    # ── Cache check (knowledge category only) ──
+    if category == "knowledge" and len(user_message) < 50:
         cache_key = _make_cache_key(user_message, pos_hash, "")
         cached = _get_cached(cache_key)
         if cached:
@@ -527,11 +594,21 @@ async def chat(
     compressed_history = _compress_history(chat_history)
 
     if search_ctx:
-        system_prompt += "\n\n" + "【网络搜索结果 - 优先使用这些实时数据】\n" + search_ctx
+        if category == "datetime":
+            prefix = "【当前日期时间 - 代码获取，绝对准确】"
+        elif category == "realtime":
+            prefix = "【网络搜索结果 - 优先使用这些实时数据】"
+        elif category == "financial":
+            prefix = "【财务数据 + 网络搜索结果】"
+        else:
+            prefix = "【外部数据】"
+        system_prompt += "\n\n" + prefix + "\n" + search_ctx
+
     if market_ctx:
         system_prompt += "\n\n" + market_ctx
-    if not search_ctx and not market_ctx and needs_search:
-        system_prompt += "\n\n" + "注意: 本次未获取到外部实时数据。可以基于你的知识提供分析，但不要编造具体数字。不确定的地方请说明。"
+
+    if system_note:
+        system_prompt += "\n\n" + system_note
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(compressed_history)
@@ -556,7 +633,7 @@ async def chat(
         try:
             logger.info(
                 f"DeepSeek request attempt={attempt+1} "
-                f"needs_search={needs_search} has_search={bool(search_ctx)} "
+                f"category={category} has_search={bool(search_ctx)} "
                 f"has_market={bool(market_ctx)} msg_len={len(user_message)}"
             )
             resp = await client.post(
@@ -604,7 +681,7 @@ async def chat(
     display = verified["display_text"]
 
     # ── Cache only non-realtime short responses ──
-    if not needs_search and len(user_message) < 50 and len(display) < 300:
+    if category == "knowledge" and len(user_message) < 50 and len(display) < 300:
         _set_cache(_make_cache_key(user_message, pos_hash, ""), display)
 
     return display
