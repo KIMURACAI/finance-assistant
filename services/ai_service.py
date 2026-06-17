@@ -530,11 +530,14 @@ async def chat(
 
     # ── STEP 3: Call model for text generation ONLY (no tool decisions) ──
 
-    # ── Call AI with temperature 0.1 ──
+    # ── Call AI with stable factual parameters ──
     payload = {
         "model": settings.DEEPSEEK_MODEL,
         "messages": messages,
-        "temperature": 0.1,
+        "temperature": 0.2,
+        "top_p": 0.5,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
         "max_tokens": settings.DEEPSEEK_MAX_TOKENS,
     }
 
@@ -643,6 +646,9 @@ async def screen_news(
                 "model": settings.DEEPSEEK_MODEL,
                 "messages": messages,
                 "temperature": 0.2,
+                "top_p": 0.5,
+                "frequency_penalty": 0,
+                "presence_penalty": 0,
                 "max_tokens": 500,
             },
             timeout=httpx.Timeout(30.0, connect=20.0),
