@@ -112,7 +112,7 @@ async def _handle_local(msg: str, user_id: int, positions: list) -> str | None:
     msg = msg.strip()
 
     # ── Add Position ──
-    m = re.match(r"添加[持仓]?\s*(\w+)\s*(.*)", msg)
+    m = re.match(r"添加(?:\s*持仓)?\s+(\w+)\s*(.*)", msg)
     if m:
         code = m.group(1).strip()
         name = m.group(2).strip()
@@ -125,7 +125,7 @@ async def _handle_local(msg: str, user_id: int, positions: list) -> str | None:
             return f"添加失败: {e}"
 
     # ── Remove Position ──
-    m = re.match(r"删除[持仓]?\s*(\w+)", msg)
+    m = re.match(r"删除(?:\s*持仓)?\s+(\w+)", msg)
     if m:
         code = m.group(1).strip()
         found = await remove_position_by_code(user_id, code)
