@@ -910,12 +910,24 @@ async def _fetch_market_context(
     if quotes:
         parts.append("---实时个股行情---")
         for q in quotes:
+            name = q.get('name', q.get('code', ''))
+            code = q.get('code', '')
             chg = q.get("change_pct", 0)
             sign = "+" if chg >= 0 else ""
-            parts.append(
-                f"  {q.get('name', q.get('code', ''))}({q.get('code', '')}): "
-                f"最新价 {q.get('price', 0):.2f}  涨跌 {sign}{chg:.2f}%"
-            )
+            sources = q.get("sources")
+            if sources:
+                # Multi-source: list all with source labels
+                price_parts = " / ".join(
+                    f"{s['price']:.2f}（{s['source']}）" for s in sources
+                )
+                parts.append(
+                    f"  {name}({code}): 最新价 {price_parts}  涨跌 {sign}{chg:.2f}%"
+                )
+            else:
+                parts.append(
+                    f"  {name}({code}): "
+                    f"最新价 {q.get('price', 0):.2f}  涨跌 {sign}{chg:.2f}%"
+                )
 
     if sectors:
         parts.append("---热门板块---")

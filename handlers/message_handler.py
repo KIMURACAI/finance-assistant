@@ -235,9 +235,16 @@ async def push_daily_briefing(uid: str, push_type: str = "morning"):
                 for q in quotes:
                     chg = q.get("change_pct", 0)
                     icon = "📈" if chg > 0 else "📉" if chg < 0 else "➖"
+                    sources = q.get("sources")
+                    if sources:
+                        price_str = " / ".join(
+                            f"{s['price']:.2f}({s['source']})" for s in sources
+                        )
+                    else:
+                        price_str = f"{q.get('price', 0):.2f}"
                     parts.append(
                         f"  {icon} {q.get('name', q.get('code',''))}: "
-                        f"{q.get('price', 0):.2f} ({chg:+.2f}%)"
+                        f"{price_str} ({chg:+.2f}%)"
                     )
             else:
                 parts.append("\n⚠️ 持仓行情暂未获取到数据")

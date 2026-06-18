@@ -1,5 +1,6 @@
 """Optimized market data service with caching, connection pool, retry."""
 
+import asyncio
 import re
 import json
 import time
@@ -53,14 +54,8 @@ def _parse_sina_line(text: str) -> Optional[dict]:
 
 # ─── Real-time Quote ──────────────────────────────────
 
-@retry(max_retries=2, base_delay=0.5)
-async def get_realtime_quote(stock_code: str) -> Optional[dict[str, Any]]:
-    """Get real-time quote with caching."""
-    # Check cache
-    cached = market_cache.get(f"quote:{stock_code}")
-    if cached:
-        return cached
-
+async def _fetch_sina_quote(stock_code: str) -> Optional[dict[str, Any]]:
+    """Fetch quote from Sina (hq.sinajs.cn). Internal helper, no caching."""
     codes = _to_sina_code(stock_code)
     for var in codes:
         url = f"https://hq.sinajs.cn/list={var}"
@@ -70,16 +65,59 @@ async def get_realtime_quote(stock_code: str) -> Optional[dict[str, Any]]:
             quote = _parse_sina_line(resp.text)
             if quote:
                 quote["code"] = stock_code
-                market_cache.set(f"quote:{stock_code}", quote, ttl=60)
                 return quote
         except Exception as e:
-            logger.debug(f"Quote fail [{var}]: {e}")
+            logger.debug(f"Sina quote fail [{var}]: {e}")
     return None
+
+
+@retry(max_retries=2, base_delay=0.5)
+async def get_realtime_quote(stock_code: str) -> Optional[dict[str, Any]]:
+    """Get real-time quote from 同花顺 (primary) + 新浪 (secondary).
+
+    Always uses 同花顺 as the primary data source for top-level fields.
+    When both sources return data and their prices disagree (>0.1%),
+    includes a 'sources' array so downstream can display both.
+    """
+    cached = market_cache.get(f"quote:{stock_code}")
+    if cached:
+        return cached
+
+    # Fetch both sources in parallel
+    t_10jqka = fetch_10jqka_quote(stock_code)
+    t_sina = _fetch_sina_quote(stock_code)
+    d_10jqka, d_sina = await asyncio.gather(t_10jqka, t_sina, return_exceptions=True)
+    if isinstance(d_10jqka, Exception):
+        d_10jqka = None
+    if isinstance(d_sina, Exception):
+        d_sina = None
+
+    primary = d_10jqka or d_sina  # 同花顺优先
+    if not primary:
+        return None
+
+    # Top-level fields = 同花顺 (primary)
+    quote = {**primary}
+    quote["code"] = stock_code
+
+    # If both sources have data and prices differ, include sources array
+    if d_10jqka and d_sina:
+        p10 = d_10jqka.get("price", 0) or 0
+        ps = d_sina.get("price", 0) or 0
+        if p10 and ps and abs(p10 - ps) / max(p10, ps) > 0.001:
+            quote["sources"] = [
+                {"source": "同花顺", "price": p10,
+                 "change_pct": d_10jqka.get("change_pct", 0) or 0},
+                {"source": "新浪", "price": ps,
+                 "change_pct": d_sina.get("change_pct", 0) or 0},
+            ]
+
+    market_cache.set(f"quote:{stock_code}", quote, ttl=60)
+    return quote
 
 
 async def get_batch_quotes(codes: list[str]) -> list[dict]:
     """Batch fetch with parallel requests."""
-    import asyncio
     tasks = [get_realtime_quote(code) for code in codes]
     results = await asyncio.gather(*tasks)
     return [r for r in results if r]
