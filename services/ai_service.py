@@ -439,6 +439,8 @@ async def route_and_execute_tools(
     is_cn_query = has_chinese or has_cn_stock
 
     market_task = _fetch_market_context(user_message, positions)
+
+    # First attempt: Chinese domain filter for CN queries
     search_task = _tavily_search(
         enhanced_query,
         max_results=5,
@@ -456,6 +458,20 @@ async def route_and_execute_tools(
     if isinstance(search_ctx, Exception):
         logger.error(f"Search exception: {search_ctx}")
         search_ctx = ""
+
+    # Fallback: if CN domain filter returned nothing, retry without filter
+    if is_cn_query and not search_ctx:
+        logger.info("CN domain filter returned empty — retrying with global search")
+        try:
+            search_ctx = await _tavily_search(
+                enhanced_query,
+                max_results=5,
+                topic="finance",
+                time_range="day",
+                include_domains=None,
+            )
+        except Exception as e:
+            logger.error(f"Global search fallback exception: {e}")
 
     logger.info(f"Raw Search Result: {search_ctx if search_ctx else '(EMPTY)'}")
     logger.info(f"Search Result Length: {len(search_ctx) if search_ctx else 0}")
