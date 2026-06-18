@@ -700,7 +700,52 @@ def _validate_hard(
     if not combined_source.strip():
         return True, "no source to validate against"
 
-    # Extract numbers from both sides
+    # ═══ Stock-price-specific validation ═══
+    # Extract stock prices from market context: "贵州茅台(600519): 最新价 1215.00  涨跌 -2.02%"
+    market_prices: dict[str, float] = {}  # code/name → price
+    for m in re.finditer(
+        r'([一-鿿\w]+)\s*\(\s*(\d{6})\s*\)\s*:\s*最新价\s*([\d.]+)',
+        market_ctx or ""
+    ):
+        name, code, price = m.group(1), m.group(2), m.group(3)
+        try:
+            market_prices[code] = float(price)
+            market_prices[name] = float(price)
+        except ValueError:
+            pass
+
+    # Check response for known stock codes/names with hallucinated prices
+    for key, real_price in list(market_prices.items()):
+        # Match full key or partial (e.g. "茅台" should match "贵州茅台")
+        matched = key in response_text
+        if not matched and len(key) > 2:
+            # Try partial: last 2+ chars of the key (e.g. "茅台" from "贵州茅台")
+            for shorten in [key[-2:], key[-3:]]:
+                if len(shorten) >= 2 and shorten in response_text:
+                    matched = True
+                    key = shorten  # use the shortened version for finding nearby price
+                    break
+        if not matched:
+            continue
+        idx = response_text.find(key)
+        if idx < 0:
+            continue
+        nearby = response_text[idx + len(key):idx + len(key) + 25]
+        for m in re.finditer(r'([\d.]+)', nearby):
+            try:
+                rp = float(m.group(1))
+                if 1 < rp < 10000:
+                    pct_off = abs(rp - real_price) / real_price
+                    if pct_off > 0.05:
+                        logger.error(
+                            f"PRICE HALLUCINATION: {key} real={real_price} model={rp} ({pct_off*100:.0f}% off)"
+                        )
+                        return False, f"wrong price {rp} for {key}, real={real_price}"
+                    break
+            except ValueError:
+                pass
+
+    # ═══ General number extraction ═══
     response_nums = _extract_numbers(response_text)
     source_nums = _extract_numbers(combined_source)
 
@@ -1091,12 +1136,11 @@ async def chat(
 
     # ── STEP 4: HARD ANTI-HALLUCINATION VALIDATION ──
     # ── Validation ──
-    # Skip for: clarification, static knowledge, datetime (no realtime data involved)
-    # Market data (Sina/同花顺) is exchange-sourced — always trust.
-    # Only hard-validate when relying solely on Tavily web search (unreliable text).
+    # Always validate numbers against market data if present (exchange-sourced, authoritative).
+    # Additionally validate against search_ctx when it's the only data source.
     _skip_validation = category in ("clarification", "static_knowledge", "datetime")
-    if search_ctx and not market_ctx and not _skip_validation:
-        passed, reason = _validate_hard(raw_content, search_ctx, "")
+    if not _skip_validation and (search_ctx or market_ctx):
+        passed, reason = _validate_hard(raw_content, search_ctx, market_ctx)
         if not passed:
             logger.error(f"VALIDATION FAILED: {reason}")
             logger.info("Final Response: External search completed but verification failed. No reliable answer generated.")
