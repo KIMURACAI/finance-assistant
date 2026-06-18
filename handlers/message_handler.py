@@ -17,34 +17,19 @@ from services.market_service import (
 )
 from pusher.wxpusher_client import send_text as push_text, send_markdown as push_markdown
 
-FEATURE_SHOWCASE = """🤖 **金融助手 · 功能指南**
+FEATURE_SHOWCASE = """我是 Kimura 的助手，主要帮他盯盘和整理资讯。你想查什么可以直接说。
 
-**📌 持仓管理**
-· `添加持仓 600519 贵州茅台`
-· `删除 600519`
-· `我的持仓` — 查看持仓列表
+比如：
+· 发个股票代码，比如 600519，我给你看行情
+· 问我今天大盘怎么样
+· 让我帮你分析某个板块或者新闻
+· 告诉我你关注哪些股票，设好之后每天早晚自动给你推市场简报
 
-**📊 行情查询**
-· 直接发送股票代码如 `600519`
-· `今天行情怎么样`
-· `热门板块有哪些`
+添加持仓：添加持仓 600519 贵州茅台
+删掉：删除 600519
+看持仓：我的持仓
 
-**📰 资讯分析**
-· `帮我分析一下科技板块`
-· `最近有什么新闻`
-· `筛选我的持仓相关资讯`
-
-**📅 每日推送**
-· 早间简报（8:30）
-· 收盘汇总（15:05）
-· AI 智能解读持仓新闻
-
-**⚙️ 偏好设置**
-· `关注新能源`
-· `关注半导体`
-· 系统会学习你的偏好优化推送
-
-💡 任何问题都可以直接问我！"""
+要什么直接说就行，不用记格式。"""
 
 
 async def send_bot_features(uid: str) -> bool:
@@ -120,9 +105,9 @@ async def _handle_local(msg: str, user_id: int, positions: list) -> str | None:
             name = _guess_name_from_code(code) or code
         try:
             await add_position(user_id, code, name)
-            return f"已添加 {name}({code}) ✅"
+            return f"{name}({code}) 加进持仓了"
         except Exception as e:
-            return f"添加失败: {e}"
+            return f"没加成: {e}"
 
     # ── Remove Position ──
     m = re.match(r"删除(?:\s*持仓)?\s+(\w+)", msg)
@@ -130,21 +115,21 @@ async def _handle_local(msg: str, user_id: int, positions: list) -> str | None:
         code = m.group(1).strip()
         found = await remove_position_by_code(user_id, code)
         if found:
-            return f"已删除 {code} ✅"
-        return f"未找到 {code}"
+            return f"{code} 删掉了"
+        return f"没找到 {code}，看看是不是代码写错了"
 
     # ── List Positions ──
     if any(kw in msg for kw in ["持仓", "我的股票", "有哪些"]):
         if not positions:
-            return "暂无持仓。发送「添加持仓 600519 贵州茅台」开始追踪。"
-        lines = ["你的持仓："]
+            return "你还没设持仓。直接跟我说「添加持仓 股票代码 名字」就行，比如添加持仓 600519 贵州茅台"
+        lines = ["你目前关注的："]
         for p in positions:
             lines.append(f"  {p.asset_name}({p.asset_code})")
         return "\n".join(lines)
 
     # ── Greetings ──
     if msg in ["你好", "hi", "hello", "在吗", "您好"]:
-        return "你好！我是你的金融助手。\n试试：\n· 添加持仓 600519 贵州茅台\n· 我的持仓\n· 今天的简报"
+        return "在，有什么想查的？"
 
     # ── Help / Features ──
     if msg in ["帮助", "help", "功能", "菜单", "?"]:

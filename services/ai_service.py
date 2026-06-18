@@ -991,10 +991,7 @@ async def chat(
             f"market_ctx_len={len(market_ctx)} — returning fallback"
         )
         logger.info("Final Response: External search failed.")
-        return (
-            "数据源暂时连不上，可能是网络波动或者 API 额度用完了。\n"
-            "稍等一会再试，如果一直不行的话告诉 Kimura，他去查一下。"
-        )
+        return "现在数据源都连不上，可能是网络波动。等一会再试试，一直不行的话跟 Kimura 说一声。"
 
     # ── Cache check (knowledge category only) ──
     if category in ("static_knowledge", "STATIC_KNOWLEDGE") and len(user_message) < 50:
@@ -1105,10 +1102,7 @@ async def chat(
         if not passed:
             logger.error(f"VALIDATION FAILED: {reason}")
             logger.info("Final Response: External search completed but verification failed. No reliable answer generated.")
-            return (
-                "这个结果我没把握，数据验证没通过，不能发给你。\n"
-                "换个角度再问一次试试？如果经常这样，跟 Kimura 说一声。"
-            )
+            return "这个结果我不太确定，数据对不上。换个角度再问一次？如果一直这样跟 Kimura 说一声。"
         logger.info("VALIDATION PASSED")
 
     logger.info(f"FINAL RESPONSE: {raw_content[:300]}{'...' if len(raw_content) > 300 else ''}")
@@ -1207,13 +1201,13 @@ def _get_fallback_reply(user_message: str) -> str:
     """Non-AI fallback when DeepSeek is unreachable."""
     msg = user_message
     if any(kw in msg for kw in ["添加", "买入", "入仓"]):
-        return "请按格式发送：添加持仓 600519 贵州茅台"
+        return "直接跟我说「添加持仓 股票代码 名字」就行"
     if any(kw in msg for kw in ["删除", "移除", "去掉"]):
-        return "请按格式发送：删除 600519"
+        return "直接发「删除 股票代码」就行"
     if any(kw in msg for kw in ["持仓", "我的", "列表"]):
-        return "查看持仓需要联网，请稍后再试。"
+        return "现在连不上，稍等一下再试试。"
     if any(kw in msg for kw in ["你好", "hi", "hello", "在吗", "在不在"]):
-        return "你好！我是你的金融助手。你可以说「添加持仓 600519」来添加股票，或者说「我的持仓」查看列表。"
+        return "在，有什么事？"
     if any(kw in msg for kw in ["早", "简报", "行情"]):
-        return "正在加载行情数据，请稍后再试。"
-    return f"你好！目前AI暂时繁忙，你可以试试：\n- 添加持仓 600519 贵州茅台\n- 我的持仓有哪些"
+        return "数据拉取中，稍等一下。"
+    return "现在有点忙，稍等一下再发一次。或者直接说「我的持仓」试试本地功能。"
