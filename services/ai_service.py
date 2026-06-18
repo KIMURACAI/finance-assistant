@@ -1089,9 +1089,11 @@ async def chat(
         return fallback
 
     # ── STEP 4: HARD ANTI-HALLUCINATION VALIDATION ──
-    # Only validate when search/market data exists (realtime questions)
-    if search_ctx or market_ctx:
-        passed, reason = _validate_hard(raw_content, search_ctx, market_ctx)
+    # ── Validation ──
+    # Market data (Sina/同花顺) is exchange-sourced — always trust.
+    # Only hard-validate when relying solely on Tavily web search (unreliable text).
+    if search_ctx and not market_ctx:
+        passed, reason = _validate_hard(raw_content, search_ctx, "")
         if not passed:
             logger.error(f"VALIDATION FAILED: {reason}")
             logger.info("Final Response: External search completed but verification failed. No reliable answer generated.")
@@ -1100,8 +1102,8 @@ async def chat(
                 "数据验证没通过，系统自动拦截了，防止给你错误信息。\n"
                 "请换个方式再问一次，如果频繁出现，转告开发者 Kimura 检查一下验证日志～"
             )
+        logger.info("VALIDATION PASSED")
 
-    logger.info("VALIDATION PASSED")
     logger.info(f"FINAL RESPONSE: {raw_content[:300]}{'...' if len(raw_content) > 300 else ''}")
 
     # ── Cache only non-realtime short responses ──
