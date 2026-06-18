@@ -409,10 +409,21 @@ async def route_and_execute_tools(
 
     # ── REALTIME / DECISION / RESEARCH: search + market ──
     logger.info(f"Need Web Search: {user_message[:80]}")
-    logger.info(f"Search Query: {user_message}")
+
+    # Build date-enhanced query for freshest results
+    from datetime import datetime, timezone, timedelta
+    tz_cn = timezone(timedelta(hours=8))
+    today_str = datetime.now(tz_cn).strftime("%Y年%m月%d日")
+    enhanced_query = f"{user_message} {today_str}"
+    logger.info(f"Search Query: {enhanced_query}")
 
     market_task = _fetch_market_context(user_message, positions)
-    search_task = _tavily_search(user_message, max_results=5)
+    search_task = _tavily_search(
+        enhanced_query,
+        max_results=5,
+        topic="finance",
+        time_range="day",
+    )
 
     market_ctx, search_ctx = await asyncio.gather(
         market_task, search_task, return_exceptions=True,
@@ -444,8 +455,20 @@ def _tavily_cache_key(query: str) -> str:
     return hashlib.md5(query.encode()).hexdigest()
 
 
-async def _tavily_search(query: str, max_results: int = 5) -> str:
-    """Search the web via Tavily API with retry + caching. Returns formatted results or empty string."""
+async def _tavily_search(
+    query: str,
+    max_results: int = 5,
+    topic: str = "finance",
+    time_range: str = "day",
+) -> str:
+    """Search the web via Tavily API with retry + caching. Returns formatted results or empty string.
+
+    Args:
+        query: Search query string
+        max_results: Number of results (0-20)
+        topic: "general", "news", or "finance" — finance gives better market data
+        time_range: "day", "week", "month", "year" — day = most recent
+    """
     if not settings.TAVILY_API_KEY:
         logger.warning("Tavily API key not configured — web search disabled")
         return ""
@@ -463,7 +486,10 @@ async def _tavily_search(query: str, max_results: int = 5) -> str:
 
     for attempt in range(2):
         try:
-            logger.info(f"Tavily API call attempt={attempt+1} query=[{query[:60]}]")
+            logger.info(
+                f"Tavily API call attempt={attempt+1} query=[{query[:60]}] "
+                f"topic={topic} time_range={time_range}"
+            )
             resp = await client.post(
                 "https://api.tavily.com/search",
                 headers={
@@ -473,8 +499,11 @@ async def _tavily_search(query: str, max_results: int = 5) -> str:
                 json={
                     "query": query,
                     "max_results": max_results,
-                    "search_depth": "basic",
+                    "search_depth": "advanced",
+                    "topic": topic,
+                    "time_range": time_range,
                     "include_answer": True,
+                    "include_raw_content": False,
                 },
                 timeout=httpx.Timeout(15.0, connect=10.0),
             )
