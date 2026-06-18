@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     AI_RESPONSE_CACHE_TTL: int = 600
 
     # Tavily Search
-    TAVILY_API_KEY: str = ""
+    TAVILY_API_KEY: str = "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"
 
     # Rate limits
     DEEPSEEK_RPM: int = 10
