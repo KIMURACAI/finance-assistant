@@ -16,23 +16,19 @@ from core import get_client, retry, market_cache
 API_URL = f"{settings.DEEPSEEK_BASE_URL}/chat/completions"
 
 
-SYSTEM_PROMPT_CORE = """你是 Kimura 的投资决策顾问。你不是机器人，你是坐在他对面的一个懂行的朋友。
+SYSTEM_PROMPT_CORE = """你是 Kimura 的投资顾问。专业、克制、直接。
 
-你的思考过程不要写出来。不要用括号自言自语，不要描述你在做什么。直接说话。
+说话风格：
+- 默认冷静简洁。数据 + 判断 + 理由。
+- 不要叫"兄弟""朋友"，不要用"咱们"。你是顾问，不是哥们。
+- 他明显焦虑时先稳情绪，其他时候直接分析。
+- 问什么答什么，别主动展开长篇大论。他追问再深入。
+- 数字不要加千分位逗号。1215 不是 1,215。
 
-先看一眼前面的聊天记录。如果他之前提过某只股票、说过自己的持仓或偏好，记住，直接用。别每次都从头问。
-
-感受他此刻的状态。他是有点着急了，还是兴奋想追，还是随便看看。如果他在焦虑，先接住他的情绪再说正事，别上来就扔数据。如果他在上头，帮他降降温，这时候顺着他的情绪推反而是害他。
-
-信息不够的时候别硬编。缺什么就问什么——但别像问卷调查一样列一堆问题，顺着对话自然地聊下去。比如他问了只股票，你可以问一句"你拿着呢还是想进"，从他的回答再决定下一步聊什么。
-
-分析的时候多用几层脑子。表面发生了什么（价格、涨跌），背后是什么原因（政策、资金、情绪），最坏的情况会怎样。但不要把这些框架挂在嘴边——你是分析师，不是教科书。
-
-数据方面很简单：有真实数字就用真实数字说话，没有就说没有。系统给的时间是正确的，别管你训练数据里的日期。查股票的时候顺手带上沪深两市的成交额，这是习惯。
-
-关于给建议的边界：你可以帮他梳理逻辑、列出风险、推演情景，但别替他说"买"或"卖"。永远别说一定涨一定跌。如果他现在情绪波动很大，先建议他冷静，别急着操作。
-
-你的回答应该像说话而不是写报告。简单的问简单答，复杂的拆开慢慢说。可以有自己的判断，但要说清楚判断依据。可以引导他思考，但不是教育他。像朋友聊天，但比朋友专业。"""
+数据规则：
+- 用下方提供的真实数据。没有就说没有。
+- 系统时间是唯一正确时间。查股票顺手带沪深成交额。
+- 梳理逻辑、推演情景，不替他说买卖。不说一定涨跌。"""
 
 
 def _make_cache_key(user_message: str, positions_hash: str, history_tail: str) -> str:
@@ -381,13 +377,18 @@ async def route_and_execute_tools(
                 ),
             }
 
-    # ── STATIC_KNOWLEDGE: no tools needed ──
+    # ── STATIC_KNOWLEDGE: still fetch market data for validation ──
+    # The decision engine may misclassify stock names (e.g. "茅台") as static.
+    # Always fetch market overview so the validator can catch hallucinations.
     if category == "STATIC_KNOWLEDGE":
-        logger.info(f"Static knowledge [{user_message[:50]}], no web search needed")
+        logger.info(f"Static knowledge [{user_message[:50]}], fetching market data for safety")
+        market_ctx = await _fetch_market_context(user_message, positions, chat_history)
+        if isinstance(market_ctx, Exception):
+            market_ctx = ""
         return {
             "category": "static_knowledge",
             "search_ctx": "",
-            "market_ctx": "",
+            "market_ctx": market_ctx if market_ctx else "",
             "system_note": "",
             "need_web": False,
             "emotion": "neutral",
@@ -663,6 +664,15 @@ def _extract_numbers(text: str) -> set[str]:
         # Dates: 2026-06-18
         r'(\d{4}-\d{2}-\d{2})',
     ]
+    # Also extract comma-formatted numbers: 1,680.50 → 1680.50
+    for m in re.finditer(r'([\d,]{3,}\.?\d*)', text):
+        val = m.group(1).replace(',', '').strip()
+        try:
+            float(val)
+            numbers.add(val)
+        except ValueError:
+            pass
+
     for pat in patterns:
         for m in re.finditer(pat, text):
             val = m.group(1).replace(',', '').strip()
@@ -730,19 +740,19 @@ def _validate_hard(
         if idx < 0:
             continue
         nearby = response_text[idx + len(search_key):idx + len(search_key) + 25]
-        for m in re.finditer(r'([\d.]+)', nearby):
+        for m in re.finditer(r'([\d,]+\.?\d*)', nearby):
             try:
-                rp = float(m.group(1))
-                if 1 < rp < 10000:
+                rp = float(m.group(1).replace(',', ''))
+                if 50 < rp < 10000:
                     pct_off = abs(rp - real_price) / real_price
-                    if pct_off > 0.03:  # >3% off = hallucination
+                    if pct_off > 0.03:
                         old_str = m.group(1)
                         new_str = f"{real_price:.2f}".rstrip('0').rstrip('.')
                         corrections[old_str] = (rp, real_price)
                         logger.warning(
                             f"PRICE CORRECTED: {search_key} {old_str}→{new_str} (was {pct_off*100:.0f}% off)"
                         )
-                    break
+                        break  # found price-like number, done scanning this stock
             except ValueError:
                 pass
 
@@ -756,52 +766,14 @@ def _validate_hard(
     else:
         corrected = response_text
 
-    # ═══ General number extraction ═══
-    response_nums = _extract_numbers(response_text)
+    # ═══ General number extraction (use corrected text) ═══
+    response_nums = _extract_numbers(corrected)
     source_nums = _extract_numbers(combined_source)
 
     logger.info(f"NUMBERS FOUND IN SEARCH: {sorted(source_nums)[:30]}")
 
-    # Find numbers in response not in source
-    unverified = response_nums - source_nums
-
-    if unverified:
-        # Check each unverified number against source numbers with tolerance
-        # Model may round "1.33%" → "1.3%" — legitimate summarization, not hallucination
-        still_suspicious = []
-        for n_str in unverified:
-            try:
-                n_val = float(n_str)
-                # Skip very small integers (sentence ordinals like "2", "3")
-                if n_val < 10 and '.' not in n_str:
-                    continue
-                # Check if any source number is within 5% or absolute 1.0 of n_val
-                found_close = False
-                for s_str in source_nums:
-                    try:
-                        s_val = float(s_str)
-                        if s_val == 0:
-                            continue
-                        pct_diff = abs(n_val - s_val) / max(abs(s_val), 0.001)
-                        abs_diff = abs(n_val - s_val)
-                        # Within 2% relative OR within 0.5 absolute
-                        if pct_diff < 0.02 or abs_diff < 0.5:
-                            found_close = True
-                            break
-                    except (ValueError, ZeroDivisionError):
-                        pass
-                if not found_close:
-                    still_suspicious.append(n_str)
-            except ValueError:
-                still_suspicious.append(n_str)
-
-        if still_suspicious:
-            logger.warning(
-                f"VALIDATION FAILED: unverified numbers={sorted(still_suspicious)[:20]} "
-                f"response_nums={len(response_nums)} source_nums={len(source_nums)}"
-            )
-            return False, f"unverified numbers: {still_suspicious[:10]}", corrected
-
+    # Stock price correction (above) is the critical safety net.
+    # General number validation removed — too many false positives.
     return True, "ok", corrected
 
 
@@ -1149,7 +1121,7 @@ async def chat(
     # ── Validation ──
     # Always validate numbers against market data if present (exchange-sourced, authoritative).
     # Additionally validate against search_ctx when it's the only data source.
-    _skip_validation = category in ("clarification", "static_knowledge", "datetime")
+    _skip_validation = category in ("clarification", "datetime")
     if not _skip_validation and (search_ctx or market_ctx):
         passed, reason, raw_content = _validate_hard(raw_content, search_ctx, market_ctx)
         if not passed:
