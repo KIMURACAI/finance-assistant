@@ -16,60 +16,63 @@ from core import get_client, retry, market_cache
 API_URL = f"{settings.DEEPSEEK_BASE_URL}/chat/completions"
 
 
-SYSTEM_PROMPT_CORE = """你是专业决策顾问。你的唯一职责是基于已提供的外部数据生成准确有用的回答。
+SYSTEM_PROMPT_CORE = """你是金融信息助手。你只能基于下方提供的【外部数据】回答。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-重要：工具决策已由其他系统完成
+当前时间 — 绝对权威
 ━━━━━━━━━━━━━━━━━━━━━━
 
-  不需要判断是否需要搜索。外部数据已经检索完成。
-  你只负责：阅读下方提供的数据 → 生成回答。
-  不决定工具使用。不想象数据不存在的情况。
+系统会在下方提供【当前日期时间 - 代码获取，绝对准确】。
+这是唯一的真实时间来源。
+你的训练数据中的时间是过时的。禁止使用。
+今天、现在、当前 — 全部以系统提供的时间为准。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-回答原则
+绝对规则 — 违反将被系统拦截
 ━━━━━━━━━━━━━━━━━━━━━━
 
-  帮用户做决策，不是教育用户。
-  不写维基百科式解释。不写教科书式定义。
-  不编造数字、日期、价格、事实。
-  不假装确定。不确定时用措辞标注。
+1. 只能使用【外部数据】中出现的数字、价格、日期、百分比。
+2. 禁止生成任何不在外部数据中的数字。包括：股价、涨跌幅、市值、PE、日期、成交额。
+3. 禁止编造新闻事件。禁止猜测。禁止使用内部知识补充。
+4. 禁止推断日期。禁止推算时间。禁止用训练数据填空。
+5. 如果外部数据不足以回答 → 直接说"数据不足，无法判断"。
+6. 禁止使用模板格式。禁止 [Direct Answer] [Key Analysis] 等标签。
+
+━━━━━━━━━━━━━━━━━━━━━━
+数据缺失时的规则 — 绝对禁止
+━━━━━━━━━━━━━━━━━━━━━━
+
+DO NOT GUESS.
+DO NOT ESTIMATE.
+DO NOT INFER DATE.
+DO NOT GENERATE APPROXIMATE PRICE.
+
+外部数据为空 → 回答: "数据不足，无法判断。"
+
+━━━━━━━━━━━━━━━━━━━━━━
+回答风格 — 自然对话
+━━━━━━━━━━━━━━━━━━━━━━
+
+用自然中文回答。像朋友聊天。
+有数字就引用。没数字就不编。
+简短直接。不写教科书。
+
+示例：
+Q: Nvidia股价
+A: 英伟达（NVDA）当前约 204 美元，今天跌了约 1.3%。
+   主要原因：AI板块回调，市场担心估值。
+   一句建议：短期波动大，别追高。
 
 ━━━━━━━━━━━━━━━━━━━━━━
 不确定时的措辞
 ━━━━━━━━━━━━━━━━━━━━━━
 
-  据现有公开信息…
-  近期公开数据显示…
-  当前可查报告表明…
-  可用信息暂时不足以判断…
+当前搜索数据不足…
+暂时无法从搜索数据中确认…
+数据不足，无法判断。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-回答格式
-━━━━━━━━━━━━━━━━━━━━━━
-
-  [Direct Answer]
-  一句话直接结论
-
-  [Key Analysis]
-  • 关键分析点
-  • 关键分析点
-  • 关键分析点
-
-  [Recommendation]
-  具体建议
-
-  [Next Action]
-  可执行的下一步
-
-规则：
-  中文。不超过250字。禁止长段落。
-  有外部数据时引用真实数字，无数据时不编造。
-  confidence_score: 有数据70-90，无数据50。
-
-━━━━━━━━━━━━━━━━━━━━━━
-JSON:
-{"question":"用户问题","verified_data":["引用来源"],"analysis":"按格式回答","confidence_score":50-90,"sources":["来源"]}"""
+输出纯文本。不要JSON。不要模板标签。"""
 
 
 def _make_cache_key(user_message: str, positions_hash: str, history_tail: str) -> str:
@@ -151,10 +154,13 @@ async def classify_intent(user_message: str) -> dict:
     Returns: {"category": str, "need_web": bool, "clarification_needed": bool, "confidence": float}
     Does NOT answer the question. ONLY classifies.
     """
+    logger.info(f"User Question: {user_message}")
+
     cache_key = hashlib.md5(("intent:" + user_message).encode()).hexdigest()
     if cache_key in _classify_cache:
         expires, val = _classify_cache[cache_key]
         if time.time() < expires:
+            logger.info(f"Decision engine cache hit: {user_message[:50]}")
             return val
         del _classify_cache[cache_key]
 
@@ -183,6 +189,7 @@ async def classify_intent(user_message: str) -> dict:
                 json_str = re.sub(r'^```(?:json)?\s*', '', json_str)
                 json_str = re.sub(r'\s*```$', '', json_str)
             result = json.loads(json_str)
+            logger.info(f"Decision engine result: category={result.get('category')} need_web={result.get('need_web')} clarify={result.get('clarification_needed')} confidence={result.get('confidence')}")
             # Cache for 30s
             _classify_cache[cache_key] = (time.time() + 30, result)
             if len(_classify_cache) > 300:
@@ -193,6 +200,7 @@ async def classify_intent(user_message: str) -> dict:
         logger.warning(f"Decision engine failed: {e}")
 
     # Fallback: conservative defaults
+    logger.info(f"Decision engine fallback: using conservative defaults for [{user_message[:50]}]")
     return {"category": "REALTIME_INFORMATION", "need_web": True, "clarification_needed": False, "confidence": 0.5}
 
 
@@ -344,8 +352,29 @@ async def route_and_execute_tools(
       3. financial → financial APIs + market data
       4. knowledge → no tools, model answers directly
 
-    Returns: {"category": str, "search_ctx": str, "market_ctx": str, "system_note": str}
+    Returns: {"category": str, "search_ctx": str, "market_ctx": str, "system_note": str, "direct_response": str|None}
     """
+    # ═══════════════════════════════════════════════════════
+    # FIX 1: Hard-coded time/date intercept.
+    # Prevent time queries from entering the AI pipeline.
+    # Skip classify_intent, Tavily, DeepSeek entirely.
+    # ═══════════════════════════════════════════════════════
+    _time_keywords = [
+        "北京时间", "现在几点", "现在时间", "当前时间",
+        "今天几号", "今天日期", "今天星期几", "几月几号",
+    ]
+    if any(kw in user_message for kw in _time_keywords):
+        dt_ctx = _get_datetime_context()
+        logger.info(f"Time query intercepted [{user_message[:50]}] — returning datetime directly, no AI")
+        return {
+            "category": "datetime",
+            "search_ctx": "",
+            "market_ctx": "",
+            "system_note": "",
+            "need_web": False,
+            "direct_response": dt_ctx,
+        }
+
     # Use decision engine for reasoning-based classification
     intent = await classify_intent(user_message)
     category = intent.get("category", "REALTIME_INFORMATION")
@@ -358,23 +387,30 @@ async def route_and_execute_tools(
     )
 
     if clarification_needed and category == "CLARIFICATION_REQUIRED":
+        logger.info(f"Clarification required for [{user_message[:50]}], no search executed")
         return {
             "category": "clarification",
             "search_ctx": f"用户问题模糊，需要先澄清再回答。反问用户具体想了解哪个方面。",
             "market_ctx": "",
             "system_note": "先反问用户澄清意图，不要直接回答。",
+            "need_web": False,
         }
 
     # ── STATIC_KNOWLEDGE: no tools needed ──
     if category == "STATIC_KNOWLEDGE":
+        logger.info(f"Static knowledge [{user_message[:50]}], no web search needed")
         return {
             "category": "static_knowledge",
             "search_ctx": "",
             "market_ctx": "",
             "system_note": "",
+            "need_web": False,
         }
 
     # ── REALTIME / DECISION / RESEARCH: search + market ──
+    logger.info(f"Need Web Search: {user_message[:80]}")
+    logger.info(f"Search Query: {user_message}")
+
     market_task = _fetch_market_context(user_message, positions)
     search_task = _tavily_search(user_message, max_results=5)
 
@@ -382,15 +418,21 @@ async def route_and_execute_tools(
         market_task, search_task, return_exceptions=True,
     )
     if isinstance(market_ctx, Exception):
+        logger.error(f"Market fetch exception: {market_ctx}")
         market_ctx = ""
     if isinstance(search_ctx, Exception):
+        logger.error(f"Search exception: {search_ctx}")
         search_ctx = ""
+
+    logger.info(f"Raw Search Result: {search_ctx if search_ctx else '(EMPTY)'}")
+    logger.info(f"Search Result Length: {len(search_ctx) if search_ctx else 0}")
 
     return {
         "category": category.lower(),
         "search_ctx": search_ctx,
         "market_ctx": market_ctx,
         "system_note": "" if search_ctx else "搜索未获取到实时数据，可用市场数据或知识回答，不编造具体数字。",
+        "need_web": need_web,
     }
 
 
@@ -405,6 +447,7 @@ def _tavily_cache_key(query: str) -> str:
 async def _tavily_search(query: str, max_results: int = 5) -> str:
     """Search the web via Tavily API with retry + caching. Returns formatted results or empty string."""
     if not settings.TAVILY_API_KEY:
+        logger.warning("Tavily API key not configured — web search disabled")
         return ""
 
     cache_key = _tavily_cache_key(query)
@@ -420,10 +463,14 @@ async def _tavily_search(query: str, max_results: int = 5) -> str:
 
     for attempt in range(2):
         try:
+            logger.info(f"Tavily API call attempt={attempt+1} query=[{query[:60]}]")
             resp = await client.post(
                 "https://api.tavily.com/search",
+                headers={
+                    "Authorization": f"Bearer {settings.TAVILY_API_KEY}",
+                    "Content-Type": "application/json",
+                },
                 json={
-                    "api_key": settings.TAVILY_API_KEY,
                     "query": query,
                     "max_results": max_results,
                     "search_depth": "basic",
@@ -431,6 +478,8 @@ async def _tavily_search(query: str, max_results: int = 5) -> str:
                 },
                 timeout=httpx.Timeout(15.0, connect=10.0),
             )
+
+            logger.info(f"Tavily HTTP status: {resp.status_code}")
 
             if resp.status_code != 200:
                 last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
@@ -440,6 +489,7 @@ async def _tavily_search(query: str, max_results: int = 5) -> str:
                 continue
 
             data = resp.json()
+            logger.info(f"Tavily raw response keys: {list(data.keys()) if data else 'None'}")
 
             # Check for API-level errors
             if data.get("error"):
@@ -456,6 +506,7 @@ async def _tavily_search(query: str, max_results: int = 5) -> str:
                 parts.append(f"摘要: {answer}")
 
             results = data.get("results", [])
+            logger.info(f"Tavily results count: {len(results)}")
             if results:
                 parts.append("搜索结果:")
                 for i, r in enumerate(results[:max_results], 1):
@@ -468,6 +519,7 @@ async def _tavily_search(query: str, max_results: int = 5) -> str:
                         parts.append(f"      URL: {url}")
 
             if not parts:
+                logger.warning("Tavily returned no results and no answer")
                 return ""
 
             formatted = "\n".join(parts)
@@ -490,87 +542,156 @@ async def _tavily_search(query: str, max_results: int = 5) -> str:
     return ""
 
 
+# ═══════════════════════════════════════════════════════════════
+# ANTI-HALLUCINATION — hard number grounding + validation
+# ═══════════════════════════════════════════════════════════════
+
+def _extract_numbers(text: str) -> set[str]:
+    """Extract all numeric tokens from text. Returns set of normalized number strings.
+
+    Catches: integers, decimals, percentages, monetary amounts, dates.
+    Normalizes: $204.65 → 204.65, -1.33% → 1.33, 5,000 → 5000
+    """
+    if not text:
+        return set()
+
+    numbers: set[str] = set()
+
+    # Match patterns: $123.45, -1.33%, 4,255.61, 1.40万亿, 2026-06-18
+    patterns = [
+        # Currency amounts: $204.65, ￥100.50
+        r'(?:[$￥€])\s*([\d,]+(?:\.\d+)?)',
+        # Percentages: -1.33%, +0.5%, 1.33%
+        r'([+-]?[\d,]+(?:\.\d+)?)\s*%',
+        # Plain decimals: 204.65, 0.5
+        r'(?<![$￥€\w])(\d+\.\d+)(?!%?\w)',
+        # Large integers with commas: 5,000 or 1,400
+        r'(?<!\w)(\d{1,3}(?:,\d{3})+)(?!\.?\d)',
+        # Plain integers in context: 207 美元, 4108.08
+        r'(?<!\w)(\d{2,})(?!\.?\d?[%]?)',
+        # Dates: 2026-06-18
+        r'(\d{4}-\d{2}-\d{2})',
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, text):
+            val = m.group(1).replace(',', '').strip()
+            try:
+                # Normalize: strip leading zeros for comparison
+                num = float(val)
+                if num == int(num) and num >= 1000:
+                    numbers.add(str(int(num)))
+                else:
+                    numbers.add(val)
+            except ValueError:
+                numbers.add(val)
+
+    return numbers
+
+
+def _validate_hard(
+    response_text: str,
+    search_ctx: str,
+    market_ctx: str,
+) -> tuple[bool, str]:
+    """Hard anti-hallucination validator.
+
+    Extracts all numbers from the model response.
+    Checks every number against the combined search + market context.
+    If ANY unverified number is found → BLOCK the response.
+
+    Returns: (passed: bool, reason: str)
+    """
+    if not response_text or not response_text.strip():
+        return False, "empty response"
+
+    # No search/market context → nothing to validate against
+    combined_source = (search_ctx or "") + "\n" + (market_ctx or "")
+    if not combined_source.strip():
+        return True, "no source to validate against"
+
+    # Extract numbers from both sides
+    response_nums = _extract_numbers(response_text)
+    source_nums = _extract_numbers(combined_source)
+
+    logger.info(f"NUMBERS FOUND IN SEARCH: {sorted(source_nums)[:30]}")
+
+    # Find numbers in response not in source
+    unverified = response_nums - source_nums
+
+    if unverified:
+        # Check each unverified number against source numbers with tolerance
+        # Model may round "1.33%" → "1.3%" — legitimate summarization, not hallucination
+        still_suspicious = []
+        for n_str in unverified:
+            try:
+                n_val = float(n_str)
+                # Skip very small integers (sentence ordinals like "2", "3")
+                if n_val < 10 and '.' not in n_str:
+                    continue
+                # Check if any source number is within 5% or absolute 1.0 of n_val
+                found_close = False
+                for s_str in source_nums:
+                    try:
+                        s_val = float(s_str)
+                        if s_val == 0:
+                            continue
+                        pct_diff = abs(n_val - s_val) / max(abs(s_val), 0.001)
+                        abs_diff = abs(n_val - s_val)
+                        # Within 2% relative OR within 0.5 absolute
+                        if pct_diff < 0.02 or abs_diff < 0.5:
+                            found_close = True
+                            break
+                    except (ValueError, ZeroDivisionError):
+                        pass
+                if not found_close:
+                    still_suspicious.append(n_str)
+            except ValueError:
+                still_suspicious.append(n_str)
+
+        if still_suspicious:
+            logger.warning(
+                f"VALIDATION FAILED: unverified numbers={sorted(still_suspicious)[:20]} "
+                f"response_nums={len(response_nums)} source_nums={len(source_nums)}"
+            )
+            return False, f"unverified numbers: {still_suspicious[:10]}"
+
+    return True, "ok"
+
+
 def _verify_and_parse(
     raw_response: str, market_context: str, user_message: str
 ) -> dict:
     """
-    Parse AI JSON response and verify factual claims against market data.
-    Returns {"status": "ok"|"no_data"|"low_confidence"|"parse_error", "display_text": str, "raw": dict}
+    Parse AI response. Now expects plain text, not JSON.
+    Returns {"status": "ok"|"low_confidence"|"parse_error", "display_text": str, "raw": dict}
     """
-    # Try to extract JSON from response
-    json_str = raw_response.strip()
+    text = raw_response.strip()
 
     # Strip markdown code fences if present
-    if json_str.startswith("```"):
-        json_str = re.sub(r'^```(?:json)?\s*', '', json_str)
-        json_str = re.sub(r'\s*```$', '', json_str)
+    if text.startswith("```"):
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text)
 
+    # Try to parse as JSON (legacy format)
     parsed = None
     try:
-        parsed = json.loads(json_str)
+        parsed = json.loads(text)
     except json.JSONDecodeError:
-        # Try to find outermost JSON object with brace matching
-        if json_str.startswith("{") or "{" in json_str:
-            start = json_str.index("{")
-            depth = 0
-            end = -1
-            for i, ch in enumerate(json_str[start:], start):
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-            if end > start:
-                try:
-                    parsed = json.loads(json_str[start:end])
-                except json.JSONDecodeError:
-                    pass
-        # Fallback: simple regex
-        if not parsed:
-            m = re.search(r'\{[^{}]*"question"\s*:\s*"[^"]*"[^{}]*\}', raw_response, re.DOTALL)
-            if m:
-                try:
-                    parsed = json.loads(m.group())
-                except json.JSONDecodeError:
-                    pass
+        pass
 
-    if not parsed or not isinstance(parsed, dict):
-        # JSON parse failed — model may have output plain text
-        # Return it as-is rather than truncating
-        logger.warning(f"AI JSON parse failed, returning raw text ({len(raw_response)} chars)")
-        return {
-            "status": "parse_error",
-            "display_text": raw_response,
-            "raw": {},
-        }
+    if parsed and isinstance(parsed, dict):
+        confidence = parsed.get("confidence_score", 0)
+        analysis = parsed.get("analysis", "")
+        if isinstance(confidence, (int, float)) and confidence < 30:
+            return {"status": "low_confidence", "display_text": "LOW CONFIDENCE", "raw": parsed}
+        display = analysis if analysis else text
+        return {"status": "ok", "display_text": display, "raw": parsed}
 
-    confidence = parsed.get("confidence_score", 0)
-    analysis = parsed.get("analysis", "")
-    question = parsed.get("question", "")
+    # Plain text response — this is the expected format now
+    if not text:
+        return {"status": "parse_error", "display_text": "", "raw": {}}
 
-    # Default to 50 if field missing or 0 — matches system prompt minimum
-    # Only explicitly-set low confidence triggers rejection
-    if not confidence or confidence == 0:
-        confidence = 50
-
-    # Reject ONLY if AI explicitly self-assigned < 30
-    if isinstance(confidence, (int, float)) and confidence < 30:
-        return {
-            "status": "low_confidence",
-            "display_text": "LOW CONFIDENCE",
-            "raw": parsed,
-        }
-
-    # Use analysis field, fallback to raw text
-    display = analysis if analysis else raw_response
-
-    return {
-        "status": "ok",
-        "display_text": display,
-        "raw": parsed,
-    }
+    return {"status": "ok", "display_text": text, "raw": {}}
 
 
 def _extract_stock_codes(msg: str) -> list[str]:
@@ -639,8 +760,13 @@ async def _fetch_market_context(
     quotes = data.get("quotes") if not isinstance(data.get("quotes"), Exception) else None
 
     if not any([overview, sectors, hot, quotes]):
+        logger.info("Market context: no data fetched")
         return ""
 
+    logger.info(
+        f"Market context fetched: overview={bool(overview)} sectors={len(sectors) if sectors else 0} "
+        f"hot={len(hot) if hot else 0} quotes={len(quotes) if quotes else 0}"
+    )
     parts = ["【实时行情数据 - 必须使用以下真实数字】"]
 
     if overview:
@@ -692,34 +818,62 @@ async def chat(
       1. route_and_execute_tools() — CODE decides → runs tools → returns data
       2. Build prompt with tool results
       3. Call model for text generation ONLY
+      4. Hard validation — block unverified numbers
     """
+    logger.info(f"USER QUESTION: {user_message}")
     pos_hash = hashlib.md5(str(positions).encode()).hexdigest()[:8]
 
     # ── Ambiguity intercept (code-level, before any tools or model) ──
     clarification = _check_ambiguous(user_message)
     if clarification:
+        logger.info(f"Final Response (clarification): {clarification[:200]}")
         return clarification
 
     # ── STEP 1: Route & execute tools (CODE decision, model not involved) ──
     tools = await route_and_execute_tools(user_message, positions)
+
+    # Check for direct response (time/date intercept — no AI needed)
+    direct = tools.get("direct_response")
+    if direct:
+        logger.info(f"Final Response (direct, no LLM): {direct[:200]}")
+        return direct
+
     category = tools["category"]
     search_ctx = tools["search_ctx"]
     market_ctx = tools["market_ctx"]
     system_note = tools["system_note"]
+    need_web = tools.get("need_web", True)
+
+    logger.info(f"WEB SEARCH RAW RESULT: {search_ctx if search_ctx else '(EMPTY)'}")
+
+    # ── STEP 1.5: Empty search guard ──
+    if need_web and not search_ctx and not market_ctx:
+        logger.warning(
+            f"External search failed — need_web={need_web} search_ctx_len={len(search_ctx)} "
+            f"market_ctx_len={len(market_ctx)} — returning fallback"
+        )
+        logger.info("Final Response: External search failed.")
+        return "External search failed."
 
     # ── Cache check (knowledge category only) ──
     if category in ("static_knowledge", "STATIC_KNOWLEDGE") and len(user_message) < 50:
         cache_key = _make_cache_key(user_message, pos_hash, "")
         cached = _get_cached(cache_key)
         if cached:
+            logger.info(f"Final Response (cached): {cached[:200]}")
             return cached
 
     # ── STEP 2: Build prompt with tool results ──
     system_prompt = _build_system_prompt(positions, preferences)
     compressed_history = _compress_history(chat_history)
 
+    # Inject REAL current datetime — ALWAYS, for every request.
+    # This prevents the model from using its training-data date cutoff.
+    datetime_ctx = _get_datetime_context()
+    system_prompt += "\n\n" + datetime_ctx
+
     if search_ctx:
-        prefix = "【外部数据 - 必须优先使用】"
+        prefix = "【外部数据 - 这是你唯一的信息来源。只能使用其中的数字和事实。】"
         system_prompt += "\n\n" + prefix + "\n" + search_ctx
 
     if market_ctx:
@@ -732,9 +886,32 @@ async def chat(
     messages.extend(compressed_history)
     messages.append({"role": "user", "content": user_message})
 
-    # ── STEP 3: Call model for text generation ONLY (no tool decisions) ──
+    # Log the FULL prompt sent to model
+    logger.info(
+        f"FULL PROMPT SENT TO MODEL ({len(system_prompt)} chars system + "
+        f"{len(compressed_history)} history msgs + user_msg={len(user_message)} chars):\n"
+        f"--- SYSTEM PROMPT (first 500) ---\n{system_prompt[:500]}\n"
+        f"--- SYSTEM PROMPT (last 200) ---\n...{system_prompt[-200:]}\n"
+        f"--- END PROMPT ---"
+    )
 
-    # ── Call AI with stable factual parameters ──
+    # Log context summary
+    context_summary = []
+    if search_ctx:
+        context_summary.append(f"search({len(search_ctx)} chars)")
+    if market_ctx:
+        context_summary.append(f"market({len(market_ctx)} chars)")
+    if system_note:
+        context_summary.append(f"note({system_note[:50]})")
+    context_summary.append(f"datetime({len(datetime_ctx)} chars)")
+    logger.info(
+        f"Context Sent To LLM: category={category} "
+        f"has_search={bool(search_ctx)} has_market={bool(market_ctx)} "
+        f"context={', '.join(context_summary)} "
+        f"total_system_chars={len(system_prompt)}"
+    )
+
+    # ── STEP 3: Call model for text generation ONLY (no tool decisions) ──
     payload = {
         "model": settings.DEEPSEEK_MODEL,
         "messages": messages,
@@ -770,39 +947,27 @@ async def chat(
                 await asyncio.sleep(1.5)
 
     if raw_content is None:
-        return _get_fallback_reply(user_message)
+        fallback = _get_fallback_reply(user_message)
+        logger.info(f"Final Response (fallback): {fallback[:200]}")
+        return fallback
 
-    # ── Verification layer ──
-    full_context = (search_ctx or "") + "\n" + (market_ctx or "")
-    verified = _verify_and_parse(raw_content, full_context, user_message)
+    # ── STEP 4: HARD ANTI-HALLUCINATION VALIDATION ──
+    # Only validate when search/market data exists (realtime questions)
+    if search_ctx or market_ctx:
+        passed, reason = _validate_hard(raw_content, search_ctx, market_ctx)
+        if not passed:
+            logger.error(f"VALIDATION FAILED: {reason}")
+            logger.info("Final Response: External search completed but verification failed. No reliable answer generated.")
+            return "External search completed but verification failed.\nNo reliable answer generated."
 
-    if verified["status"] == "low_confidence":
-        logger.warning(
-            f"LOW CONFIDENCE: confidence={verified['raw'].get('confidence_score')}"
-        )
-        return "LOW CONFIDENCE"
-
-    if verified["status"] == "parse_error":
-        # Model returned plain text instead of JSON — use it directly
-        raw = verified["display_text"]
-        # Strip "LOW CONFIDENCE" if model put it inline
-        if raw.strip().upper().startswith("LOW CONFIDENCE"):
-            raw = raw.strip()[len("LOW CONFIDENCE"):].strip()
-        logger.warning(f"JSON parse failed, returning raw text ({len(raw)} chars)")
-        return raw if raw else "抱歉，处理出错，请重试。"
-
-    logger.info(
-        f"AI OK: confidence={verified['raw'].get('confidence_score')} "
-        f"verified_items={len(verified['raw'].get('verified_data', []))}"
-    )
-
-    display = verified["display_text"]
+    logger.info("VALIDATION PASSED")
+    logger.info(f"FINAL RESPONSE: {raw_content[:300]}{'...' if len(raw_content) > 300 else ''}")
 
     # ── Cache only non-realtime short responses ──
-    if category in ("static_knowledge", "STATIC_KNOWLEDGE") and len(user_message) < 50 and len(display) < 300:
-        _set_cache(_make_cache_key(user_message, pos_hash, ""), display)
+    if category in ("static_knowledge", "STATIC_KNOWLEDGE") and len(user_message) < 50 and len(raw_content) < 300:
+        _set_cache(_make_cache_key(user_message, pos_hash, ""), raw_content)
 
-    return display
+    return raw_content
 
 
 @retry(max_retries=2, base_delay=1.0)

@@ -347,6 +347,132 @@ async def test_ai_flow(msg: str = "你好"):
     return {"status": "ok", "steps": steps, "total_time": round(time.time() - t0, 2)}
 
 
+@app.get("/test/tavily")
+async def test_tavily(query: str = "今日A股行情"):
+    """Debug Tavily search end-to-end: API key check → raw call → formatted result."""
+    import time as time_mod
+    from services.ai_service import _tavily_search
+
+    t0 = time_mod.time()
+    result = {
+        "api_key_configured": bool(settings.TAVILY_API_KEY),
+        "api_key_prefix": settings.TAVILY_API_KEY[:8] + "..." if settings.TAVILY_API_KEY else "(empty)",
+        "query": query,
+    }
+
+    if not settings.TAVILY_API_KEY:
+        result["status"] = "no_api_key"
+        result["note"] = "TAVILY_API_KEY not set in .env — web search is disabled"
+        return result
+
+    # Make a raw direct call to verify API connectivity
+    from core import get_client
+    import httpx as httpx_mod
+
+    client = get_client()
+    raw_result = {}
+
+    # Test 1: Direct raw call with verbose logging
+    try:
+        raw_resp = await client.post(
+            "https://api.tavily.com/search",
+            headers={
+                "Authorization": f"Bearer {settings.TAVILY_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "query": query,
+                "max_results": 3,
+                "search_depth": "basic",
+                "include_answer": True,
+            },
+            timeout=httpx_mod.Timeout(15.0, connect=10.0),
+        )
+        raw_result["http_status"] = raw_resp.status_code
+        raw_result["response_keys"] = list(raw_resp.json().keys()) if raw_resp.status_code == 200 else None
+        raw_result["raw_body"] = raw_resp.text[:500]
+        raw_result["raw_json"] = raw_resp.json()
+    except Exception as e:
+        raw_result["error"] = str(e)
+
+    result["raw_api_response"] = raw_result
+
+    # Test 2: Through the normal _tavily_search function
+    try:
+        formatted = await _tavily_search(query, max_results=5)
+        result["search_result_length"] = len(formatted) if formatted else 0
+        result["search_result"] = formatted[:1000] if formatted else "(EMPTY)"
+    except Exception as e:
+        result["search_error"] = str(e)
+
+    result["total_time"] = round(time_mod.time() - t0, 2)
+    return result
+
+
+@app.get("/test/pipeline-trace")
+async def test_pipeline_trace(msg: str = "今天科技板块怎么样"):
+    """Full pipeline trace: classify → search → model. Prints every step."""
+    import time as time_mod
+    from services.ai_service import classify_intent, route_and_execute_tools, _tavily_search, _fetch_market_context
+
+    t0 = time_mod.time()
+    trace = {"user_message": msg, "steps": []}
+
+    # Step 1: Classify intent
+    try:
+        intent = await classify_intent(msg)
+        trace["steps"].append({"step": "classify_intent", "ok": True, "result": intent})
+    except Exception as e:
+        trace["steps"].append({"step": "classify_intent", "ok": False, "error": str(e)})
+        trace["total_time"] = round(time_mod.time() - t0, 2)
+        return trace
+
+    # Step 2: Route and execute tools
+    try:
+        tools = await route_and_execute_tools(msg, [])
+        trace["steps"].append({
+            "step": "route_and_execute_tools",
+            "ok": True,
+            "category": tools["category"],
+            "search_ctx_len": len(tools["search_ctx"]),
+            "market_ctx_len": len(tools["market_ctx"]),
+            "system_note": tools["system_note"],
+        })
+    except Exception as e:
+        trace["steps"].append({"step": "route_and_execute_tools", "ok": False, "error": str(e)})
+
+    # Step 3: Raw Tavily call directly
+    if settings.TAVILY_API_KEY:
+        try:
+            raw_search = await _tavily_search(msg, max_results=3)
+            trace["steps"].append({
+                "step": "raw_tavily",
+                "ok": True,
+                "result_len": len(raw_search),
+                "result": raw_search[:300] if raw_search else "(EMPTY)",
+            })
+        except Exception as e:
+            trace["steps"].append({"step": "raw_tavily", "ok": False, "error": str(e)})
+    else:
+        trace["steps"].append({"step": "raw_tavily", "ok": False, "error": "TAVILY_API_KEY not set"})
+
+    # Step 4: Full chat call
+    try:
+        from services.ai_service import chat
+        reply = await chat(msg, [], {}, [])
+        trace["steps"].append({
+            "step": "chat",
+            "ok": True,
+            "reply_len": len(reply),
+            "reply": reply[:500],
+        })
+    except Exception as e:
+        trace["steps"].append({"step": "chat", "ok": False, "error": str(e)})
+
+    trace["total_time"] = round(time_mod.time() - t0, 2)
+    return trace
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", settings.PORT))
 

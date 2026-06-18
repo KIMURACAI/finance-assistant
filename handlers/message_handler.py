@@ -77,6 +77,7 @@ async def handle_user_message(user_id_str: str, msg_content: str) -> str:
         return local_reply
 
     # AI for complex queries
+    logger.info(f"User Question: {msg_content}")
     pos_list = [p.to_dict() for p in positions]
     pref_dict = {
         "focus_keywords": pref.focus_keywords or "",
@@ -93,6 +94,7 @@ async def handle_user_message(user_id_str: str, msg_content: str) -> str:
     )
 
     final_reply = reply or "已处理。"
+    logger.info(f"Final Response (handler): {final_reply[:200]}")
     await add_chat(user_id, "assistant", final_reply)
     return final_reply
 
