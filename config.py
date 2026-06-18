@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     PROJECT_ROOT: Path = Path(__file__).parent
     LOG_DIR: Path = PROJECT_ROOT / "logs"
-    DB_PATH: Path = PROJECT_ROOT / "data" / "finance.db"
+    DB_PATH: Path = PROJECT_ROOT / "finance_assistant.db"
 
     # DeepSeek
     DEEPSEEK_API_KEY: str = ""
