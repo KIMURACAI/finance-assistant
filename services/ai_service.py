@@ -322,6 +322,19 @@ async def route_and_execute_tools(
                     logger.info(f"Feedback loop: correction='{user_message[:30]}' original='{prev[:30]}'")
                 break
 
+    # ── Code-level stock code detection: override model classification ──
+    # Model may not recognize bare 6-digit numbers as stock codes.
+    # If the message contains stock codes, force realtime path regardless of model output.
+    _msg_codes = _extract_stock_codes(user_message)
+    if _msg_codes and (category == "CLARIFICATION_REQUIRED" or not need_web):
+        logger.info(
+            f"Stock code override: {_msg_codes} — forcing REALTIME "
+            f"(was {category}, web={need_web})"
+        )
+        category = "REALTIME_INFORMATION"
+        need_web = True
+        clarification_needed = False
+
     if clarification_needed and category == "CLARIFICATION_REQUIRED":
         logger.info(f"Clarification required for [{user_message[:50]}], returning direct追问")
         # If chat history exists, let the model handle it with context instead of blocking
