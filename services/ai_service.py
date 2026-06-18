@@ -241,7 +241,7 @@ def _check_ambiguous(msg: str) -> str:
     has_broad = any(cat in msg for cat in broad_categories)
 
     # Has a specific stock code? If yes, it's not vague
-    has_stock_code = bool(re.search(r'\b\d{6}\b', msg))
+    has_stock_code = bool(re.search(r'(?<![a-zA-Z0-9])\d{6}(?![a-zA-Z0-9])', msg))
 
     if has_broad and not has_stock_code:
         return (
@@ -317,7 +317,7 @@ def _classify_question(msg: str) -> str:
             return "realtime"
 
     # Stock code pattern = realtime
-    if re.search(r'\b\d{6}\b', msg):
+    if re.search(r'(?<![a-zA-Z0-9])\d{6}(?![a-zA-Z0-9])', msg):
         return "realtime"
 
     # ── Category 4: Knowledge (default) ──
@@ -435,7 +435,7 @@ async def route_and_execute_tools(
         "cls.cn",
     ]
     has_chinese = bool(re.search(r'[一-鿿]', user_message))
-    has_cn_stock = bool(re.search(r'\b\d{6}\b', user_message))
+    has_cn_stock = bool(re.search(r'(?<![a-zA-Z0-9])\d{6}(?![a-zA-Z0-9])', user_message))
     is_cn_query = has_chinese or has_cn_stock
 
     market_task = _fetch_market_context(user_message, positions)
@@ -771,7 +771,7 @@ def _extract_stock_codes(msg: str) -> list[str]:
     # Match patterns: 600519, sh600519, sz000001, 000001
     codes = []
     # Full codes with optional exchange prefix
-    for m in re.finditer(r'\b(sh|sz)?(\d{6})\b', msg, re.IGNORECASE):
+    for m in re.finditer(r'(?<![a-zA-Z0-9])(sh|sz)?(\d{6})(?![a-zA-Z0-9])', msg, re.IGNORECASE):
         codes.append(m.group(2))
     # Dedup preserving order
     seen = set()
