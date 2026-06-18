@@ -417,12 +417,29 @@ async def route_and_execute_tools(
     enhanced_query = f"{user_message} {today_str}"
     logger.info(f"Search Query: {enhanced_query}")
 
+    # Detect Chinese-market queries — restrict to Chinese finance domains
+    # to avoid Yahoo Finance junk (random US options, unrelated pages)
+    _cn_finance_domains = [
+        "eastmoney.com",
+        "sina.com.cn",
+        "10jqka.com.cn",
+        "qq.com",
+        "cninfo.com.cn",
+        "hexun.com",
+        "xueqiu.com",
+        "cls.cn",
+    ]
+    has_chinese = bool(re.search(r'[一-鿿]', user_message))
+    has_cn_stock = bool(re.search(r'\b\d{6}\b', user_message))
+    is_cn_query = has_chinese or has_cn_stock
+
     market_task = _fetch_market_context(user_message, positions)
     search_task = _tavily_search(
         enhanced_query,
         max_results=5,
         topic="finance",
         time_range="day",
+        include_domains=_cn_finance_domains if is_cn_query else None,
     )
 
     market_ctx, search_ctx = await asyncio.gather(
@@ -460,6 +477,7 @@ async def _tavily_search(
     max_results: int = 5,
     topic: str = "finance",
     time_range: str = "day",
+    include_domains: list[str] | None = None,
 ) -> str:
     """Search the web via Tavily API with retry + caching. Returns formatted results or empty string.
 
@@ -468,12 +486,13 @@ async def _tavily_search(
         max_results: Number of results (0-20)
         topic: "general", "news", or "finance" — finance gives better market data
         time_range: "day", "week", "month", "year" — day = most recent
+        include_domains: Optional list of domains to restrict search to
     """
     if not settings.TAVILY_API_KEY:
         logger.warning("Tavily API key not configured — web search disabled")
         return ""
 
-    cache_key = _tavily_cache_key(query)
+    cache_key = _tavily_cache_key(query + str(include_domains))
     if cache_key in _tavily_cache:
         expires, val = _tavily_cache[cache_key]
         if time.time() < expires:
@@ -488,23 +507,26 @@ async def _tavily_search(
         try:
             logger.info(
                 f"Tavily API call attempt={attempt+1} query=[{query[:60]}] "
-                f"topic={topic} time_range={time_range}"
+                f"topic={topic} time_range={time_range} domains={include_domains}"
             )
+            body = {
+                "query": query,
+                "max_results": max_results,
+                "search_depth": "advanced",
+                "topic": topic,
+                "time_range": time_range,
+                "include_answer": True,
+                "include_raw_content": False,
+            }
+            if include_domains:
+                body["include_domains"] = include_domains
             resp = await client.post(
                 "https://api.tavily.com/search",
                 headers={
                     "Authorization": f"Bearer {settings.TAVILY_API_KEY}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "query": query,
-                    "max_results": max_results,
-                    "search_depth": "advanced",
-                    "topic": topic,
-                    "time_range": time_range,
-                    "include_answer": True,
-                    "include_raw_content": False,
-                },
+                json=body,
                 timeout=httpx.Timeout(15.0, connect=10.0),
             )
 

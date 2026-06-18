@@ -323,3 +323,67 @@ async def get_stock_news(stock_code: str) -> list[dict]:
     except Exception as e:
         logger.warning(f"Stock news fail [{stock_code}]: {e}")
         return []
+
+
+# ─── 同花顺 (10jqka) Direct Scraping ──────────────────
+
+async def fetch_10jqka_quote(stock_code: str) -> Optional[dict]:
+    """Fetch real-time stock quote from 同花顺 (10jqka.com.cn).
+
+    Returns dict with: code, name, price, change_pct, high, low, volume, amount
+    """
+    cached = market_cache.get(f"10jqka:quote:{stock_code}")
+    if cached:
+        return cached
+
+    pure_code = stock_code.replace("sh", "").replace("sz", "")
+    try:
+        client = get_client()
+        url = f"https://d.10jqka.com.cn/v2/realhead/hs_{pure_code}/last.js"
+        resp = await client.get(
+            url,
+            headers={
+                "Referer": "https://stockpage.10jqka.com.cn/",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            },
+            timeout=10.0,
+        )
+        if resp.status_code != 200:
+            return None
+
+        text = resp.text
+        import re as _re
+        m = _re.search(r'\{.*\}', text, _re.DOTALL)
+        if not m:
+            return None
+
+        data = json.loads(m.group())
+        if not data or "items" not in data:
+            return None
+
+        items = data["items"]
+        # 同花顺 uses numeric field IDs:
+        # 10=现价, 6=昨收, 199112=涨跌幅, 7=今开, 8=最高, 9=最低, 13=成交量, 19=成交额
+        try:
+            result = {
+                "code": items.get("5", pure_code),
+                "name": items.get("name", ""),
+                "price": float(items.get("10", 0) or 0),
+                "open": float(items.get("7", 0) or 0),
+                "prev_close": float(items.get("6", 0) or 0),
+                "change_pct": float(items.get("199112", 0) or 0),
+                "high": float(items.get("8", 0) or 0),
+                "low": float(items.get("9", 0) or 0),
+                "volume": float(items.get("13", 0) or 0),
+                "amount": float(items.get("19", 0) or 0),
+                "time": items.get("time", ""),
+            }
+        except (ValueError, TypeError):
+            return None
+        market_cache.set(f"10jqka:quote:{stock_code}", result, ttl=60)
+        return result
+    except Exception as e:
+        logger.warning(f"10jqka quote fail [{stock_code}]: {e}")
+        return None
+
+
