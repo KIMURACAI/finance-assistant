@@ -41,15 +41,17 @@ async def _safe_run(name: str, push_type: str):
 def start_scheduler():
     h_m, m_m = settings.PUSH_TIME_MORNING.split(":")
     scheduler.add_job(
-        lambda: _safe_run("Morning", "morning"),
+        _safe_run,
         CronTrigger(hour=int(h_m), minute=int(m_m)),
         id="morning", replace_existing=True, misfire_grace_time=300,
+        kwargs={"name": "Morning", "push_type": "morning"},
     )
     h_e, m_e = settings.PUSH_TIME_EVENING.split(":")
     scheduler.add_job(
-        lambda: _safe_run("Closing", "closing"),
+        _safe_run,
         CronTrigger(hour=int(h_e), minute=int(m_e)),
         id="closing", replace_existing=True, misfire_grace_time=300,
+        kwargs={"name": "Closing", "push_type": "closing"},
     )
     scheduler.start()
     logger.info(f"Scheduler: morning {settings.PUSH_TIME_MORNING} / closing {settings.PUSH_TIME_EVENING}")
