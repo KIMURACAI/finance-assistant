@@ -201,8 +201,104 @@ async def health():
     return {
         "status": "ok",
         "deepseek": bool(settings.DEEPSEEK_API_KEY),
+        "tavily": bool(settings.TAVILY_API_KEY),
         "wechat": bool(settings.WECHAT_APP_ID),
     }
+
+
+@app.get("/debug/connectivity")
+async def debug_connectivity():
+    """Test ALL external API connectivity from this server's location.
+    Use this to diagnose Railway vs local discrepancies.
+    """
+    import time as _time
+    from core import get_client as _gc
+
+    client = _gc()
+    results = {}
+    t0 = _time.time()
+
+    # 1. Sina (market overview, stock quotes)
+    try:
+        t1 = _time.time()
+        r = await client.get("https://hq.sinajs.cn/list=sh000001",
+            headers={"Referer": "https://finance.sina.com.cn"}, timeout=8.0)
+        results["sina"] = {"ok": r.status_code == 200, "status": r.status_code,
+                           "time": round(_time.time() - t1, 2)}
+    except Exception as e:
+        results["sina"] = {"ok": False, "error": str(e)[:100]}
+
+    # 2. EastMoney (sectors, hot stocks)
+    try:
+        t1 = _time.time()
+        r = await client.get(
+            "https://push2.eastmoney.com/api/qt/clist/get",
+            params={"cb": "", "pn": 1, "pz": 1, "po": 1, "np": 1, "fltt": 2, "invt": 2,
+                    "fid": "f3", "fs": "m:0+t:6", "fields": "f12,f14",
+                    "ut": "bd1d9ddb04089700cf9c27f6f7426281"},
+            headers={"Referer": "https://quote.eastmoney.com/"}, timeout=8.0)
+        results["eastmoney"] = {"ok": r.status_code == 200, "status": r.status_code,
+                                "time": round(_time.time() - t1, 2)}
+    except Exception as e:
+        results["eastmoney"] = {"ok": False, "error": str(e)[:100]}
+
+    # 3. DeepSeek
+    try:
+        t1 = _time.time()
+        r = await client.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
+            json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "hi"}],
+                  "max_tokens": 5}, timeout=10.0)
+        results["deepseek"] = {"ok": r.status_code == 200, "status": r.status_code,
+                               "time": round(_time.time() - t1, 2)}
+    except Exception as e:
+        results["deepseek"] = {"ok": False, "error": str(e)[:100]}
+
+    # 4. Tavily
+    if settings.TAVILY_API_KEY:
+        try:
+            t1 = _time.time()
+            r = await client.post(
+                "https://api.tavily.com/search",
+                headers={"Authorization": f"Bearer {settings.TAVILY_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={"query": "test", "max_results": 1}, timeout=10.0)
+            results["tavily"] = {"ok": r.status_code == 200, "status": r.status_code,
+                                 "time": round(_time.time() - t1, 2)}
+        except Exception as e:
+            results["tavily"] = {"ok": False, "error": str(e)[:100]}
+    else:
+        results["tavily"] = {"ok": False, "error": "TAVILY_API_KEY not configured"}
+
+    # 5. 同花顺
+    try:
+        t1 = _time.time()
+        r = await client.get(
+            "https://d.10jqka.com.cn/v2/realhead/hs_600519/last.js",
+            headers={"Referer": "https://stockpage.10jqka.com.cn/",
+                     "User-Agent": "Mozilla/5.0"}, timeout=8.0)
+        results["10jqka"] = {"ok": r.status_code == 200, "status": r.status_code,
+                             "time": round(_time.time() - t1, 2)}
+    except Exception as e:
+        results["10jqka"] = {"ok": False, "error": str(e)[:100]}
+
+    # 6. WeChat API
+    try:
+        t1 = _time.time()
+        r = await client.get("https://api.weixin.qq.com/cgi-bin/token",
+            params={"grant_type": "client_credential",
+                    "appid": settings.WECHAT_APP_ID,
+                    "secret": settings.WECHAT_APP_SECRET}, timeout=8.0)
+        results["wechat_api"] = {"ok": r.status_code == 200, "status": r.status_code,
+                                 "time": round(_time.time() - t1, 2)}
+    except Exception as e:
+        results["wechat_api"] = {"ok": False, "error": str(e)[:100]}
+
+    total_ok = sum(1 for v in results.values() if v.get("ok"))
+    results["SUMMARY"] = {"total_ok": total_ok, "total_tested": len(results),
+                          "total_time": round(_time.time() - t0, 2)}
+    return results
 
 
 @app.get("/debug/metrics")
