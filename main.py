@@ -198,8 +198,18 @@ async def _ai_reply_async(openid: str, content: str):
 
 @app.get("/health")
 async def health():
+    import subprocess
+    git_hash = "unknown"
+    try:
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(settings.PROJECT_ROOT), timeout=2
+        ).decode().strip()
+    except Exception:
+        pass
     return {
         "status": "ok",
+        "version": git_hash,
         "deepseek": bool(settings.DEEPSEEK_API_KEY),
         "tavily": bool(settings.TAVILY_API_KEY),
         "wechat": bool(settings.WECHAT_APP_ID),
@@ -299,6 +309,37 @@ async def debug_connectivity():
     results["SUMMARY"] = {"total_ok": total_ok, "total_tested": len(results),
                           "total_time": round(_time.time() - t0, 2)}
     return results
+
+
+@app.get("/debug/echo")
+async def debug_echo(msg: str = "上证指数现在多少点"):
+    """Mirror of WeChat user pipeline. Returns EXACTLY what a user would see."""
+    import time as _time
+    from database.db import get_or_create_user
+    from handlers.message_handler import handle_user_message
+
+    t0 = _time.time()
+    test_uid = "debug_test_user"
+
+    try:
+        user = await get_or_create_user(test_uid)
+    except Exception as e:
+        return {"error": f"db: {e}"}
+
+    try:
+        reply = await handle_user_message(test_uid, msg)
+        return {
+            "user_message": msg,
+            "reply": reply,
+            "reply_len": len(reply),
+            "time": round(_time.time() - t0, 2),
+        }
+    except Exception as e:
+        return {
+            "user_message": msg,
+            "error": str(e)[:300],
+            "time": round(_time.time() - t0, 2),
+        }
 
 
 @app.get("/debug/metrics")
