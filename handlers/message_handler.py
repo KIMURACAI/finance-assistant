@@ -17,19 +17,19 @@ from services.market_service import (
 )
 from pusher.wxpusher_client import send_text as push_text, send_markdown as push_markdown
 
-FEATURE_SHOWCASE = """我是 Kimura 的助手，主要帮他盯盘和整理资讯。你想查什么可以直接说。
+FEATURE_SHOWCASE = """在的，有什么想了解的随时问。
 
-比如：
+比如你可以：
 · 发个股票代码，比如 600519，我给你看行情
-· 问我今天大盘怎么样
-· 让我帮你分析某个板块或者新闻
+· 问今天大盘怎么样
+· 让我分析某个板块或者新闻
 · 告诉我你关注哪些股票，设好之后每天早晚自动给你推市场简报
 
 添加持仓：添加持仓 600519 贵州茅台
 删掉：删除 600519
 看持仓：我的持仓
 
-要什么直接说就行，不用记格式。"""
+直接说就行，不用记格式。"""
 
 
 async def send_bot_features(uid: str) -> bool:
