@@ -8,7 +8,7 @@
 |------|------|
 | 📊 **持仓管理** | 通过对话添加/删除/查看持仓（股票、基金） |
 | 🌅 **早间简报** | 每日 08:30 推送市场概况 + 持仓相关资讯 |
-| 🌆 **收盘简报** | 每日 17:30 推送持仓表现 + AI 解读 |
+| 🌆 **收盘简报** | 每日 15:05 推送持仓表现 + AI 解读 |
 | 🤖 **AI 对话** | 基于 DeepSeek 的自然语言交互 |
 | 🎯 **智能筛选** | AI 根据用户持仓自动筛选相关新闻 |
 | 📋 **日志记录** | 完整的推送记录和对话历史 |
@@ -34,11 +34,11 @@ cd finance_assistant
 
 ```ini
 DEEPSEEK_API_KEY=sk-your-key-here
-WECOM_CORP_ID=ww123456789
-WECOM_AGENT_ID=1000001
-WECOM_CORP_SECRET=your-secret
-WECOM_TOKEN=your-random-token
-WECOM_ENCODING_AES_KEY=your-43-char-aes-key
+TAVILY_API_KEY=tvly-your-key-here
+WECHAT_APP_ID=your-app-id
+WECHAT_APP_SECRET=your-app-secret
+WECHAT_TOKEN=finance123
+SERVERCHAN_SENDKEY=your-sendkey-here  # 可选
 ```
 
 ### 3. 运行
@@ -81,32 +81,40 @@ natapp -authtoken=你的token -port=8000
 
 ```
 finance_assistant/
-├── main.py                  # FastAPI 入口 + 回调
+├── main.py                  # FastAPI 入口 + 微信回调
 ├── config.py                # 配置管理
-├── .env                     # 加密配置（勿提交）
+├── .env                     # 密钥配置（勿提交）
+├── .env.example             # 配置模板
 ├── requirements.txt         # 依赖
+├── Procfile                 # Railway 部署
+├── start.bat                # Windows 启动脚本
 ├── database/
 │   ├── models.py            # SQLAlchemy 数据模型
 │   └── db.py                # 数据库操作
-├── collector/
-│   ├── akshare_collector.py # AKShare 实时行情/新闻
-│   └── eastmoney_collector.py # 东方财富 API
-├── ai/
-│   └── deepseek_client.py   # DeepSeek API 调用
-├── wechat/
-│   └── wecom_bot.py         # 企业微信消息推送
+├── services/
+│   ├── ai_service.py        # DeepSeek AI + Tavily 搜索 + 反幻觉验证
+│   └── market_service.py    # 实时行情（新浪/东方财富/同花顺）
 ├── handlers/
-│   └── message_handler.py   # 对话处理逻辑
+│   └── message_handler.py   # 消息处理 + 本地命令
+├── wechat/
+│   └── official_account.py  # 微信公众号 API
 ├── scheduler/
-│   └── daily_task.py        # 定时任务
+│   └── daily_task.py        # 定时推送（早间/收盘）
+├── pusher/
+│   └── wxpusher_client.py   # Server酱推送（备用通道）
+├── core/
+│   └── __init__.py           # HTTP 客户端 + 重试 + 缓存
+├── data/                    # 运行时数据
+│   └── finance.db           # SQLite 数据库
 ├── logs/                    # 日志文件
-└── start.bat                # Windows 启动脚本
+└── templates/               # 前端模板（可选）
 ```
 
 ## 技术栈
 
 - **Python 3.10+** | FastAPI + APScheduler
-- **DeepSeek API** — 对话、新闻筛选
-- **AKShare** — 实时行情、个股信息
-- **企业微信 API** — 消息推送与回调
+- **DeepSeek API** — AI 对话、新闻筛选
+- **新浪财经 / 东方财富 / 同花顺** — 实时行情、个股信息
+- **Tavily Search API** — 实时网络搜索
+- **微信公众号 API** — 消息推送与回调
 - **SQLite (aiosqlite)** — 轻量数据存储

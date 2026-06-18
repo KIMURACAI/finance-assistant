@@ -306,8 +306,20 @@ async def route_and_execute_tools(
         need_web = True
         for h in reversed(chat_history):
             if h.get("role") == "user" and h.get("content"):
-                _enhanced_correction = f"{h['content']} {user_message}"
-                logger.info(f"Feedback loop: correction='{user_message[:30]}' original='{h['content'][:30]}'")
+                prev = h["content"]
+                # Skip if the history entry IS the current message (saved before fetch)
+                if prev.strip() == user_message.strip():
+                    continue
+                # Smart check: don't combine if correction changes the topic entirely
+                prev_codes = set(_extract_stock_codes(prev))
+                curr_codes = set(_extract_stock_codes(user_message))
+                if curr_codes and prev_codes and not (curr_codes & prev_codes):
+                    # Topic change — different stocks, use correction as fresh query
+                    logger.info(f"Feedback loop: topic change detected, not combining. prev={prev[:30]} curr={user_message[:30]}")
+                    _enhanced_correction = None
+                else:
+                    _enhanced_correction = f"{prev} {user_message}"
+                    logger.info(f"Feedback loop: correction='{user_message[:30]}' original='{prev[:30]}'")
                 break
 
     if clarification_needed and category == "CLARIFICATION_REQUIRED":
@@ -815,9 +827,13 @@ async def _fetch_market_context(
     if not msg_codes and is_market:
         from services.market_service import search_stock
         import re as _re2
-        # Strip common query words to get potential stock name
+        # Strip common query words + correction noise to get potential stock name
         name_hint = _re2.sub(
-            r'(的?股价|的?股票|的?行情|多少[钱点]?|怎么样|如何|今天|现在|最新|实时|查询|帮我|看一下|查一下)',
+            r'(的?股价|的?股票|的?行情|多少[钱点]?|怎么样|如何|今天|现在'
+            r'|最新|实时|查询|帮我|看一下|查一下|查的'
+            r'|不对|错了|不是这个|不是这样|搞错了'
+            r'|我要|我?想?[查看了]的?[是]?'
+            r'|这个|那个|重新|再查|换一个|你再看看)',
             '', user_message
         ).strip()
         if name_hint and len(name_hint) >= 2:

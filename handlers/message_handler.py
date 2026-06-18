@@ -63,6 +63,8 @@ async def handle_user_message(user_id_str: str, msg_content: str) -> str:
     user_id = user.id
     positions = await get_user_positions(user_id)
     pref = await get_or_create_pref(user_id)
+    # Fetch history BEFORE saving current message — feedback loop needs past context
+    recent = await get_recent_chats(user_id, limit=4)
     await add_chat(user_id, "user", msg_content)
 
     # New user welcome
@@ -84,8 +86,6 @@ async def handle_user_message(user_id_str: str, msg_content: str) -> str:
         "industry_focus": pref.industry_focus or "",
         "risk_level": pref.risk_level or "medium",
     }
-    recent = await get_recent_chats(user_id, limit=4)
-
     reply = await chat(
         user_message=msg_content,
         positions=pos_list,

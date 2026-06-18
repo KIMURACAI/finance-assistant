@@ -32,12 +32,6 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
 
-# ─── Session context manager ─────────────────────────
-async def get_session() -> AsyncSession:
-    async with AsyncSessionLocal() as ses:
-        yield ses
-
-
 # ─── User ─────────────────────────────────────────────
 async def get_all_users() -> list[User]:
     """Get all registered users (for scheduled pushes)."""
