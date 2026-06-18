@@ -57,6 +57,11 @@ DO NOT GENERATE APPROXIMATE PRICE.
 有数字就引用。没数字就不编。
 简短直接。不写教科书。
 
+查询个股时，必须附带深沪两市成交额（行情数据中有）。
+格式示例：
+贵州茅台（600519）1215.00元，跌2.02%。
+沪市成交1.56万亿，深市成交1.75万亿。
+
 示例：
 Q: Nvidia股价
 A: 英伟达（NVDA）当前约 204 美元，今天跌了约 1.3%。
@@ -821,11 +826,23 @@ async def _fetch_market_context(
     parts = ["【实时行情数据 - 必须使用以下真实数字】"]
 
     if overview:
-        icon = "🔴" if overview.get("change_pct", 0) < 0 else "🟢"
-        parts.append(
-            f"{icon} {overview['index_name']}: {overview['price']:.2f}  "
-            f"涨跌: {overview['change_pct']:+.2f}%"
-        )
+        # overview is now {"sh": {...}, "sz": {...}} with amount fields
+        sh = overview.get("sh")
+        sz = overview.get("sz")
+        if sh:
+            icon = "🔴" if sh.get("change_pct", 0) < 0 else "🟢"
+            parts.append(
+                f"{icon} {sh['index_name']}: {sh['price']:.2f}  "
+                f"涨跌: {sh['change_pct']:+.2f}%  "
+                f"成交额: {sh.get('amount_str', '未知')}"
+            )
+        if sz:
+            icon = "🔴" if sz.get("change_pct", 0) < 0 else "🟢"
+            parts.append(
+                f"{icon} {sz['index_name']}: {sz['price']:.2f}  "
+                f"涨跌: {sz['change_pct']:+.2f}%  "
+                f"成交额: {sz.get('amount_str', '未知')}"
+            )
 
     if quotes:
         parts.append("---实时个股行情---")

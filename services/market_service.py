@@ -87,29 +87,57 @@ async def get_batch_quotes(codes: list[str]) -> list[dict]:
 
 # ─── Market Overview ──────────────────────────────────
 
+def _fmt_amount(amt: float) -> str:
+    """Format market turnover in human-readable Chinese units."""
+    if amt >= 1e12:
+        return f"{amt/1e12:.2f}万亿"
+    elif amt >= 1e8:
+        return f"{amt/1e8:.2f}亿"
+    return f"{amt:.0f}"
+
+
 @retry(max_retries=2)
 async def get_market_overview() -> Optional[dict]:
-    """Shanghai Composite Index."""
+    """Shanghai Composite Index + Shenzhen Component Index."""
     cached = market_cache.get("market:overview")
     if cached:
         return cached
 
     try:
         client = get_client()
+        # Fetch both Shanghai and Shenzhen indices
         resp = await client.get(
-            "https://hq.sinajs.cn/list=sh000001",
+            "https://hq.sinajs.cn/list=sh000001,sz399001",
             headers={"Referer": "https://finance.sina.com.cn"},
         )
-        quote = _parse_sina_line(resp.text)
-        if quote:
-            result = {
-                "index_name": "上证指数",
-                "price": quote["price"],
-                "change_pct": quote["change_pct"],
-                "change_amt": round(quote["price"] - quote["prev_close"], 2),
-            }
-            market_cache.set("market:overview", result, ttl=60)
-            return result
+        lines = resp.text.strip().split("\n")
+        results = {}
+        for line in lines:
+            quote = _parse_sina_line(line)
+            if not quote:
+                continue
+            name = quote.get("name", "")
+            if "上证" in name or "000001" in str(quote.get("code", "")):
+                results["sh"] = {
+                    "index_name": "上证指数",
+                    "price": quote["price"],
+                    "change_pct": quote["change_pct"],
+                    "change_amt": round(quote["price"] - quote["prev_close"], 2),
+                    "amount": quote.get("amount", 0),
+                    "amount_str": _fmt_amount(quote.get("amount", 0)),
+                }
+            elif "深证" in name or "399001" in str(quote.get("code", "")):
+                results["sz"] = {
+                    "index_name": "深证成指",
+                    "price": quote["price"],
+                    "change_pct": quote["change_pct"],
+                    "change_amt": round(quote["price"] - quote["prev_close"], 2),
+                    "amount": quote.get("amount", 0),
+                    "amount_str": _fmt_amount(quote.get("amount", 0)),
+                }
+        if results:
+            market_cache.set("market:overview", results, ttl=60)
+            return results
     except Exception as e:
         logger.warning(f"Market overview fail: {e}")
     return None

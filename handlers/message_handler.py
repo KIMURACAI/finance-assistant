@@ -205,14 +205,26 @@ async def push_daily_briefing(uid: str, push_type: str = "morning"):
         # ─── 收盘汇总 ───
         parts.append("📊 **今日收盘汇总**\n")
 
-        # Market overview
+        # Market overview (now dual-index: sh + sz)
         if market:
-            icon = "🔴" if market.get("change_pct", 0) < 0 else "🟢"
-            parts.append(
-                f"{icon} **{market.get('index_name', '上证')}**: "
-                f"{market.get('price', 0):.0f} "
-                f"({market.get('change_pct', 0):+.2f}%)"
-            )
+            sh = market.get("sh")
+            sz = market.get("sz")
+            if sh:
+                icon = "🔴" if sh.get("change_pct", 0) < 0 else "🟢"
+                parts.append(
+                    f"{icon} **{sh.get('index_name', '上证')}**: "
+                    f"{sh.get('price', 0):.0f} "
+                    f"({sh.get('change_pct', 0):+.2f}%)  "
+                    f"成交: {sh.get('amount_str', '')}"
+                )
+            if sz:
+                icon = "🔴" if sz.get("change_pct", 0) < 0 else "🟢"
+                parts.append(
+                    f"{icon} **{sz.get('index_name', '深证')}**: "
+                    f"{sz.get('price', 0):.0f} "
+                    f"({sz.get('change_pct', 0):+.2f}%)  "
+                    f"成交: {sz.get('amount_str', '')}"
+                )
 
         # User positions performance
         pos_codes = [p.asset_code for p in positions]
@@ -277,11 +289,23 @@ async def push_daily_briefing(uid: str, push_type: str = "morning"):
         # ─── 早间简报 ───
         parts.append("☀️ **早间简报**\n")
         if market:
-            icon = "+" if market.get("change_pct", 0) > 0 else ""
-            parts.append(
-                f"上证: {market.get('price', 0):.0f} "
-                f"({icon}{market.get('change_pct', 0):+.2f}%)\n"
-            )
+            sh = market.get("sh")
+            sz = market.get("sz")
+            if sh:
+                icon = "+" if sh.get("change_pct", 0) > 0 else ""
+                parts.append(
+                    f"上证: {sh.get('price', 0):.0f} "
+                    f"({icon}{sh.get('change_pct', 0):+.2f}%)  "
+                    f"成交: {sh.get('amount_str', '')}"
+                )
+            if sz:
+                icon = "+" if sz.get("change_pct", 0) > 0 else ""
+                parts.append(
+                    f"深证: {sz.get('price', 0):.0f} "
+                    f"({icon}{sz.get('change_pct', 0):+.2f}%)  "
+                    f"成交: {sz.get('amount_str', '')}"
+                )
+            parts.append("")
         if sectors:
             for s in sectors[:5]:
                 chg = s.get("change_pct", 0)
