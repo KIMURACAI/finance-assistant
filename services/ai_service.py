@@ -176,44 +176,7 @@ async def classify_intent(user_message: str) -> dict:
             "confidence": 0.5, "emotion": "neutral", "emotion_intensity": 1, "action_tendency": "unknown"}
 
 
-def _check_ambiguous(msg: str) -> str:
-    """Detect ambiguous questions. Returns clarification text or empty string.
-
-    Intercepts BEFORE any tools or model calls. No API waste on vague queries.
-    """
-    # Must match a vague pattern
-    vague_patterns = [
-        r'怎么样\s*$', r'怎么样\?', r'如何\s*$', r'如何\?',
-        r'好不好\s*$', r'好不好\?', r'行不行', r'能不能买',
-        r'能买吗', r'值得买吗', r'可以买吗',
-        r'分析一下\s*$',
-    ]
-    is_vague = False
-    for pat in vague_patterns:
-        if re.search(pat, msg):
-            is_vague = True
-            break
-
-    if not is_vague:
-        return ""
-
-    # Vague question about a BROAD category (not a specific stock)
-    broad_categories = [
-        "股票", "A股", "港股", "美股", "板块", "赛道",
-        "基金", "外汇", "债券", "大宗商品",
-    ]
-    has_broad = any(cat in msg for cat in broad_categories)
-
-    # Has a specific stock code? If yes, it's not vague
-    has_stock_code = bool(re.search(r'(?<![a-zA-Z0-9])\d{6}(?![a-zA-Z0-9])', msg))
-
-    if has_broad and not has_stock_code:
-        return (
-            f"你说的这个范围有点大，是想看具体的股票机会，还是了解整个行业的趋势？\n"
-            f"稍微说细一点，我就能帮你看得更准。"
-        )
-
-    return ""
+# _check_ambiguous removed — model handles clarification via classify_intent now.
 
 
 def _classify_question(msg: str) -> str:
@@ -321,30 +284,6 @@ async def route_and_execute_tools(
 
     Returns: {"category": str, "search_ctx": str, "market_ctx": str, "system_note": str, "direct_response": str|None}
     """
-    # ═══════════════════════════════════════════════════════
-    # FIX 1: Hard-coded time/date intercept.
-    # Prevent time queries from entering the AI pipeline.
-    # Skip classify_intent, Tavily, DeepSeek entirely.
-    # ═══════════════════════════════════════════════════════
-    _time_keywords = [
-        "北京时间", "现在几点", "现在时间", "当前时间",
-        "今天几号", "今天日期", "今天星期几", "几月几号",
-    ]
-    if any(kw in user_message for kw in _time_keywords):
-        dt_ctx = _get_datetime_context()
-        logger.info(f"Time query intercepted [{user_message[:50]}] — returning datetime directly, no AI")
-        return {
-            "category": "datetime",
-            "search_ctx": "",
-            "market_ctx": "",
-            "system_note": "",
-            "need_web": False,
-            "emotion": "neutral",
-            "emotion_intensity": 1,
-            "action_tendency": "unknown",
-            "direct_response": dt_ctx,
-        }
-
     # Use decision engine for reasoning-based classification
     intent = await classify_intent(user_message)
     category = intent.get("category", "REALTIME_INFORMATION")
@@ -377,11 +316,9 @@ async def route_and_execute_tools(
                 ),
             }
 
-    # ── STATIC_KNOWLEDGE: still fetch market data for validation ──
-    # The decision engine may misclassify stock names (e.g. "茅台") as static.
-    # Always fetch market overview so the validator can catch hallucinations.
+    # ── STATIC_KNOWLEDGE: no web search, but still fetch market data ──
     if category == "STATIC_KNOWLEDGE":
-        logger.info(f"Static knowledge [{user_message[:50]}], fetching market data for safety")
+        logger.info(f"Static knowledge [{user_message[:50]}], fetching market data for context")
         market_ctx = await _fetch_market_context(user_message, positions, chat_history)
         if isinstance(market_ctx, Exception):
             market_ctx = ""
@@ -981,12 +918,6 @@ async def chat(
     """
     logger.info(f"USER QUESTION: {user_message}")
     pos_hash = hashlib.md5(str(positions).encode()).hexdigest()[:8]
-
-    # ── Ambiguity intercept (code-level, before any tools or model) ──
-    clarification = _check_ambiguous(user_message)
-    if clarification:
-        logger.info(f"Final Response (clarification): {clarification[:200]}")
-        return clarification
 
     # ── STEP 1: Route & execute tools (CODE decision, model not involved) ──
     compressed_history = _compress_history(chat_history)
