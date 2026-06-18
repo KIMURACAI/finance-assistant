@@ -16,80 +16,67 @@ from core import get_client, retry, market_cache
 API_URL = f"{settings.DEEPSEEK_BASE_URL}/chat/completions"
 
 
-SYSTEM_PROMPT_CORE = """你是金融信息助手。你只能基于下方提供的【外部数据】回答。
+SYSTEM_PROMPT_CORE = """你是 Kimura 的专属金融决策教练。
+
+你的工作不是报数据，而是帮用户做决策。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-当前时间 — 绝对权威
+你的思考流程
 ━━━━━━━━━━━━━━━━━━━━━━
 
-系统会在下方提供【当前日期时间 - 代码获取，绝对准确】。
-这是唯一的真实时间来源。
-你的训练数据中的时间是过时的。禁止使用。
-今天、现在、当前 — 全部以系统提供的时间为准。
+收到用户消息后，按这个顺序思考：
+
+1. 用户真正的意图是什么？（FOMO追涨 / 恐慌想卖 / 求确认 / 探索机会 / 普通咨询）
+2. 聊天记录里之前在聊什么？（维持上下文，不要每次都像第一次对话）
+3. 下方提供的数据能回答什么？
+4. 数据不足以判断时，直接告诉用户缺什么，追问。
+5. 给出判断 + 理由 + 下一步该观察什么。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-绝对规则 — 违反将被系统拦截
+当前时间
 ━━━━━━━━━━━━━━━━━━━━━━
 
-1. 只能使用【外部数据】中出现的数字、价格、日期、百分比。
-2. 禁止生成任何不在外部数据中的数字。包括：股价、涨跌幅、市值、PE、日期、成交额。
-3. 禁止编造新闻事件。禁止猜测。禁止使用内部知识补充。
-4. 禁止推断日期。禁止推算时间。禁止用训练数据填空。
-5. 如果外部数据不足以回答 → 用下方「数据不足时的回复模板」回答。
-6. 禁止使用模板格式。禁止 [Direct Answer] [Key Analysis] 等标签。
+系统提供的【当前日期时间】是唯一真实时间。训练数据时间是过时的。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-数据缺失时的规则 — 绝对禁止
+数据规则
 ━━━━━━━━━━━━━━━━━━━━━━
 
-DO NOT GUESS.
-DO NOT ESTIMATE.
-DO NOT INFER DATE.
-DO NOT GENERATE APPROXIMATE PRICE.
-
-数据不足时的回复模板（选择匹配的一条）：
-
-行情数据有、但搜索无额外信息 → 正常用行情数据回答，不要提数据不足。
-
-行情和搜索都为空：
-"抱歉呀，这次查询没能获取到足够的数据 🥲
-可能是网络波动或者数据源暂时不可用。
-如果连续几次都这样，麻烦告诉开发者 Kimura 帮我看一下～"
-
-搜索结果和行情数据不一致（验证失败）：
-"这条信息我暂时没法确认 🛡️
-为了不给你错误数据，系统自动拦截了。
-请换个方式再问一次，或者转告开发者 Kimura 检查一下日志。"
+有数据 → 引用真实数字做判断。
+没数据 → 诚实说"这个我暂时查不到"，然后追问用户来缩小范围。
+禁止编数字。禁止编新闻。禁止编日期。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-回答风格 — 自然对话
+回答格式 — 像朋友聊天
 ━━━━━━━━━━━━━━━━━━━━━━
 
-用自然中文回答。像朋友聊天。
-有数字就引用。没数字就不编。
-简短直接。不写教科书。
+根据场景灵活调整，不套模板。可以参考这个结构：
 
-查询个股时，必须附带深沪两市成交额（行情数据中有）。
-格式示例：
-贵州茅台（600519）1215.00元，跌2.02%。
-沪市成交1.56万亿，深市成交1.75万亿。
+一句话结论（好/不好/等等/可以/不行 + 为什么）
+关键数据（如果有）
+需要注意的风险
+接下来观察什么
 
-示例：
-Q: Nvidia股价
-A: 英伟达（NVDA）当前约 204 美元，今天跌了约 1.3%。
-   主要原因：AI板块回调，市场担心估值。
-   一句建议：短期波动大，别追高。
+查个股时附带沪深成交额。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-不确定时的措辞
+示例
 ━━━━━━━━━━━━━━━━━━━━━━
 
-据现有行情数据…
-暂时无法从数据中确认…
-这段时间的数据还没出来，稍后再查～
+Q: 茅台怎么样
+A: 今天1215元，跌了2.02%，大盘也偏弱（沪市-0.43%）。
+   跌的主要原因是整个白酒板块都在回调。
+   如果你有持仓的话，建议先看看能不能守住1200。
+   没持仓的话现在不是好买点，等企稳再说。
 
-━━━━━━━━━━━━━━━━━━━━━━
-输出纯文本。不要JSON。不要模板标签。"""
+Q: 最近有什么机会
+A: 今天创业板涨了1.46%，比主板强。半导体和通信设备资金在进。
+   不过个股分化很严重，3200多只股票在跌。
+   你现在有仓位吗？偏好短线还是中长线？我帮你缩小一下范围。
+
+Q: 说详细一点
+A: （结合上面的聊天记录，把刚才讨论的那只股票展开说）
+   刚才说的XX，今天详细数据是这样的…"""
 
 
 def _make_cache_key(user_message: str, positions_hash: str, history_tail: str) -> str:
@@ -360,6 +347,7 @@ def _get_datetime_context() -> str:
 
 async def route_and_execute_tools(
     user_message: str, positions: list[dict],
+    chat_history: list[dict] | None = None,
 ) -> dict:
     """Router: classify question → execute correct tools → return data.
 
@@ -404,14 +392,27 @@ async def route_and_execute_tools(
     )
 
     if clarification_needed and category == "CLARIFICATION_REQUIRED":
-        logger.info(f"Clarification required for [{user_message[:50]}], no search executed")
-        return {
-            "category": "clarification",
-            "search_ctx": f"用户问题模糊，需要先澄清再回答。反问用户具体想了解哪个方面。",
-            "market_ctx": "",
-            "system_note": "先反问用户澄清意图，不要直接回答。",
-            "need_web": False,
-        }
+        logger.info(f"Clarification required for [{user_message[:50]}], returning direct追问")
+        # If chat history exists, let the model handle it with context instead of blocking
+        if chat_history:
+            # Pass through — model has history context to understand the follow-up
+            logger.info("Chat history present — letting model handle with context")
+        else:
+            return {
+                "category": "clarification",
+                "search_ctx": "",
+                "market_ctx": "",
+                "system_note": "",
+                "need_web": False,
+                "direct_response": (
+                    "能再说具体一点吗？\n"
+                    "比如：\n"
+                    "① 你想了解哪只股票？\n"
+                    "② 关注它的股价、基本面还是新闻？\n"
+                    "③ 有持仓还是想买入？\n"
+                    "给我一个方向，我帮你详细分析～"
+                ),
+            }
 
     # ── STATIC_KNOWLEDGE: no tools needed ──
     if category == "STATIC_KNOWLEDGE":
@@ -450,7 +451,7 @@ async def route_and_execute_tools(
     has_cn_stock = bool(re.search(r'(?<![a-zA-Z0-9])\d{6}(?![a-zA-Z0-9])', user_message))
     is_cn_query = has_chinese or has_cn_stock
 
-    market_task = _fetch_market_context(user_message, positions)
+    market_task = _fetch_market_context(user_message, positions, chat_history)
 
     # First attempt: Chinese domain filter for CN queries
     search_task = _tavily_search(
@@ -815,6 +816,7 @@ def _extract_stock_codes(msg: str) -> list[str]:
 
 async def _fetch_market_context(
     user_message: str, positions: list[dict],
+    chat_history: list[dict] | None = None,
 ) -> str:
     """Fetch real-time market data and format for AI context."""
     from services.market_service import (
@@ -828,6 +830,14 @@ async def _fetch_market_context(
 
     # Extract stock codes from the message itself
     msg_codes = _extract_stock_codes(user_message) if is_market else []
+
+    # Also extract from chat history (for follow-up messages like "说详细一点")
+    history_codes: list[str] = []
+    if chat_history:
+        for h in chat_history[-4:]:  # last 4 messages
+            content = h.get("content", "") if isinstance(h, dict) else ""
+            if content:
+                history_codes.extend(_extract_stock_codes(content))
 
     # If no codes found, try to find stock by name (e.g. "捷昌驱动的股价")
     if not msg_codes and is_market:
@@ -851,9 +861,9 @@ async def _fetch_market_context(
     if not is_market and not has_positions:
         return ""
 
-    # Collect all codes to fetch: positions + extracted from message
+    # Collect all codes to fetch: positions + message + chat history
     pos_codes = [p.get("asset_code", "") for p in positions if p.get("asset_code")]
-    all_codes = list(dict.fromkeys(pos_codes + msg_codes))  # dedup, preserve order
+    all_codes = list(dict.fromkeys(pos_codes + msg_codes + history_codes))  # dedup, preserve order
 
     # Fetch concurrently
     tasks = []
@@ -963,7 +973,8 @@ async def chat(
         return clarification
 
     # ── STEP 1: Route & execute tools (CODE decision, model not involved) ──
-    tools = await route_and_execute_tools(user_message, positions)
+    compressed_history = _compress_history(chat_history)
+    tools = await route_and_execute_tools(user_message, positions, compressed_history)
 
     # Check for direct response (time/date intercept — no AI needed)
     direct = tools.get("direct_response")
@@ -1002,7 +1013,6 @@ async def chat(
 
     # ── STEP 2: Build prompt with tool results ──
     system_prompt = _build_system_prompt(positions, preferences)
-    compressed_history = _compress_history(chat_history)
 
     # Inject REAL current datetime — ALWAYS, for every request.
     # This prevents the model from using its training-data date cutoff.
@@ -1090,9 +1100,11 @@ async def chat(
 
     # ── STEP 4: HARD ANTI-HALLUCINATION VALIDATION ──
     # ── Validation ──
+    # Skip for: clarification, static knowledge, datetime (no realtime data involved)
     # Market data (Sina/同花顺) is exchange-sourced — always trust.
     # Only hard-validate when relying solely on Tavily web search (unreliable text).
-    if search_ctx and not market_ctx:
+    _skip_validation = category in ("clarification", "static_knowledge", "datetime")
+    if search_ctx and not market_ctx and not _skip_validation:
         passed, reason = _validate_hard(raw_content, search_ctx, "")
         if not passed:
             logger.error(f"VALIDATION FAILED: {reason}")
