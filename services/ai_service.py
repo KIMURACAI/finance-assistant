@@ -591,8 +591,20 @@ async def _tavily_search(
             parts = []
 
             answer = data.get("answer", "")
-            if answer:
+            # Filter out Tavily's negative "no data found" summaries.
+            # These LLM-generated answers contradict real market data from Sina.
+            _negative_patterns = [
+                "does not contain", "no direct data", "no specific",
+                "there is no", "none of the provided", "does not provide",
+                "the user is asking", "the provided data",
+                "based on the available information, there is no",
+                "does not address", "cannot provide", "unable to provide",
+            ]
+            is_negative = answer and any(p in answer.lower() for p in _negative_patterns)
+            if answer and not is_negative:
                 parts.append(f"摘要: {answer}")
+            elif is_negative:
+                logger.info("Tavily answer filtered (negative/no-data summary)")
 
             results = data.get("results", [])
             logger.info(f"Tavily results count: {len(results)}")
@@ -602,6 +614,7 @@ async def _tavily_search(
                     title = r.get("title", "")[:100]
                     content = r.get("content", "")[:200]
                     url = r.get("url", "")
+                    # Also skip results that are clearly off-topic
                     parts.append(f"  [{i}] {title}")
                     parts.append(f"      {content}")
                     if url:
@@ -815,6 +828,25 @@ async def _fetch_market_context(
 
     # Extract stock codes from the message itself
     msg_codes = _extract_stock_codes(user_message) if is_market else []
+
+    # If no codes found, try to find stock by name (e.g. "捷昌驱动的股价")
+    if not msg_codes and is_market:
+        from services.market_service import search_stock
+        import re as _re2
+        # Strip common query words to get potential stock name
+        name_hint = _re2.sub(
+            r'(的?股价|的?股票|的?行情|多少[钱点]?|怎么样|如何|今天|现在|最新|实时|查询|帮我|看一下|查一下)',
+            '', user_message
+        ).strip()
+        if name_hint and len(name_hint) >= 2:
+            logger.info(f"Searching stock by name: {name_hint}")
+            try:
+                found = await search_stock(name_hint)
+                if found:
+                    msg_codes = [s["code"] for s in found[:3]]
+                    logger.info(f"Found stocks by name: {msg_codes}")
+            except Exception as e:
+                logger.warning(f"Stock name search failed: {e}")
 
     if not is_market and not has_positions:
         return ""
