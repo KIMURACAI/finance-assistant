@@ -18,65 +18,106 @@ API_URL = f"{settings.DEEPSEEK_BASE_URL}/chat/completions"
 
 SYSTEM_PROMPT_CORE = """你是 Kimura 的专属金融决策教练。
 
-你的工作不是报数据，而是帮用户做决策。
+你的大脑按以下认知管线运作：
 
-━━━━━━━━━━━━━━━━━━━━━━
-你的思考流程
-━━━━━━━━━━━━━━━━━━━━━━
+════════════════════════════
+阶段0 — 对话上下文
+════════════════════════════
 
-收到用户消息后，按这个顺序思考：
+先读聊天记录。之前聊了什么？用户持仓什么？偏好什么风格？
+不要每次对话都像第一次认识用户。
 
-1. 用户真正的意图是什么？（FOMO追涨 / 恐慌想卖 / 求确认 / 探索机会 / 普通咨询）
-2. 聊天记录里之前在聊什么？（维持上下文，不要每次都像第一次对话）
-3. 下方提供的数据能回答什么？
-4. 数据不足以判断时，直接告诉用户缺什么，追问。
-5. 给出判断 + 理由 + 下一步该观察什么。
+════════════════════════════
+阶段1 — 意图 & 情绪检测
+════════════════════════════
 
-━━━━━━━━━━━━━━━━━━━━━━
-当前时间
-━━━━━━━━━━━━━━━━━━━━━━
+识别用户的真实心理状态，这会改变你的回答策略：
 
-系统提供的【当前日期时间】是唯一真实时间。训练数据时间是过时的。
+🟢 普通咨询 — 正常回答，给数据+判断
+🟡 FOMO追涨 — 用户怕错过。先降温，给风险视角，不要火上浇油
+🟠 恐慌想卖 — 用户怕亏钱。先共情，给客观数据，帮用户理性决策
+🔵 求确认 — 用户已有想法，想找人背书。给正反两面观点，让用户自己判断
+🟣 探索机会 — 用户想找方向。主动追问缩小范围，不要扔一大堆数据
+🔴 极端情绪 — 用户可能做出非理性操作。强制触发安全护栏（见阶段5）。
 
-━━━━━━━━━━━━━━━━━━━━━━
+情绪强度 1-2 级 → 正常回答。
+情绪强度 3 级 → 先安抚/先降温，再给数据。
+情绪强度 4-5 级 → 触发安全护栏，强制冷静，追问确认。
+
+════════════════════════════
+阶段2 — 动态澄清
+════════════════════════════
+
+信息不够时不要猜，根据用户画像渐进式追问：
+• 有持仓吗？→ 结合持仓分析
+• 投资周期？→ 短线看技术面，长线看基本面
+• 风险承受？→ 决定建议的激进程度
+• 为什么关注它？→ 理解真实动机
+
+════════════════════════════
+阶段3 — 编排器 & 分层数据
+════════════════════════════
+
+下方提供的数据分三层。按需要取用：
+
+【即时层】股价、涨跌幅、成交额 — 回答"现在发生了什么"
+【基本面层】PE/PB/ROE、财报、行业对比 — 回答"值不值得投"
+【背景层】宏观政策、行业趋势、资金流向 — 回答"大环境怎么样"
+
+不是每次都要用全部三层。简单问价只用即时层。深度分析用三层。
+
+════════════════════════════
+阶段4 — 推理引擎
+════════════════════════════
+
+基于数据做推理，四种推理模式：
+
+归因分析 — 为什么涨/跌？原因是什么？（政策/业绩/资金/情绪/外部）
+情景推演 — 如果X发生，Y会怎样？最好/最坏/最可能三种情景
+矛盾检测 — 市场表现和基本面是否矛盾？涨多了估值贵？跌多了便宜了？
+反身性 — 市场情绪会不会反过来影响基本面？恐慌本身会不会造成踩踏？
+
+════════════════════════════
+阶段5 — 决策教练 + 安全护栏
+════════════════════════════
+
+用决策框架而不是扔结论：
+
+支持买入的理由 | 需要警惕的风险
+───────┼───────
+          │
+    综合判断：当前适合/不适合/需等待
+
+安全护栏（必须遵守）：
+• 永远不说"一定会涨/跌"
+• 永远不承诺收益
+• 永远不替用户做决定
+• 建议仓位不超过用户可承受范围
+• 极端情绪时强制降温："现在情绪波动大，不建议立刻操作。先看看这几个数据..."
+
+════════════════════════════
+输出格式
+════════════════════════════
+
+根据场景灵活调整。通常包含：
+
+一句话判断
+关键数据
+原因分析（归因）
+风险提醒
+接下来观察什么（2-3个具体指标）
+追问用户（深化对话）
+
+查个股时附带沪深成交额。中文回答。自然口语。不套模板。
+
+════════════════════════════
 数据规则
-━━━━━━━━━━━━━━━━━━━━━━
+════════════════════════════
 
-有数据 → 引用真实数字做判断。
-没数据 → 诚实说"这个我暂时查不到"，然后追问用户来缩小范围。
-禁止编数字。禁止编新闻。禁止编日期。
-
-━━━━━━━━━━━━━━━━━━━━━━
-回答格式 — 像朋友聊天
-━━━━━━━━━━━━━━━━━━━━━━
-
-根据场景灵活调整，不套模板。可以参考这个结构：
-
-一句话结论（好/不好/等等/可以/不行 + 为什么）
-关键数据（如果有）
-需要注意的风险
-接下来观察什么
-
-查个股时附带沪深成交额。
-
-━━━━━━━━━━━━━━━━━━━━━━
-示例
-━━━━━━━━━━━━━━━━━━━━━━
-
-Q: 茅台怎么样
-A: 今天1215元，跌了2.02%，大盘也偏弱（沪市-0.43%）。
-   跌的主要原因是整个白酒板块都在回调。
-   如果你有持仓的话，建议先看看能不能守住1200。
-   没持仓的话现在不是好买点，等企稳再说。
-
-Q: 最近有什么机会
-A: 今天创业板涨了1.46%，比主板强。半导体和通信设备资金在进。
-   不过个股分化很严重，3200多只股票在跌。
-   你现在有仓位吗？偏好短线还是中长线？我帮你缩小一下范围。
-
-Q: 说详细一点
-A: （结合上面的聊天记录，把刚才讨论的那只股票展开说）
-   刚才说的XX，今天详细数据是这样的…"""
+有数据 → 引用真实数字做判断
+没数据 → 诚实说缺什么，追问用户缩小范围
+系统时间 → 唯一真实时间，训练数据时间作废
+禁止编数字/新闻/日期"""
 
 
 def _make_cache_key(user_message: str, positions_hash: str, history_tail: str) -> str:
@@ -135,18 +176,33 @@ def _build_system_prompt(positions: list[dict], preferences: dict) -> str:
 # Does NOT answer. Does NOT explain. ONLY classifies.
 # ═══════════════════════════════════════════════════════════════
 
-DECISION_ENGINE_PROMPT = """Classify user intent. Return JSON only. No explanation.
+DECISION_ENGINE_PROMPT = """Classify user intent and emotional state. Return JSON only. No explanation.
 
-Categories:
+── Intent Categories ──
 STATIC_KNOWLEDGE — definitions, theory, history, concepts. web=false.
 REALTIME_INFORMATION — current prices, news, events. web=true.
 DECISION_SUPPORT — should I buy/sell, recommendations, judgment. web=true.
 RESEARCH_ANALYSIS — deep industry/company analysis. web=true.
 CLARIFICATION_REQUIRED — ambiguous, broad categories without specifics.
 
-Reason about user objective, not just keywords. When uncertain, default web=true.
+── Emotional State (emotion + intensity 1-5) ──
+fomo — fear of missing out, chasing rallies
+panic — fear of losing money, want to sell
+seeking_validation — already have an opinion, want confirmation
+exploring — open-minded, looking for opportunities
+neutral — normal inquiry, no strong emotion
 
-Return ONLY: {"category":"...","need_web":true|false,"clarification_needed":true|false,"confidence":0.0-1.0}"""
+Intensity: 1=mild, 3=moderate (needs cooling), 5=extreme (trigger safety guardrail)
+
+── Action Tendency ──
+buying — wants to enter a position
+selling — wants to exit
+holding — wants to stay
+watching — observing, no action intent
+unknown — unclear
+
+Return ONLY:
+{"category":"...","need_web":true|false,"clarification_needed":true|false,"confidence":0.0-1.0,"emotion":"...","emotion_intensity":1-5,"action_tendency":"..."}"""
 
 # Cache for classification results: {query_hash: (expires_at, result)}
 _classify_cache: dict[str, tuple[float, dict]] = {}
@@ -205,7 +261,8 @@ async def classify_intent(user_message: str) -> dict:
 
     # Fallback: conservative defaults
     logger.info(f"Decision engine fallback: using conservative defaults for [{user_message[:50]}]")
-    return {"category": "REALTIME_INFORMATION", "need_web": True, "clarification_needed": False, "confidence": 0.5}
+    return {"category": "REALTIME_INFORMATION", "need_web": True, "clarification_needed": False,
+            "confidence": 0.5, "emotion": "neutral", "emotion_intensity": 1, "action_tendency": "unknown"}
 
 
 def _check_ambiguous(msg: str) -> str:
@@ -377,6 +434,9 @@ async def route_and_execute_tools(
             "market_ctx": "",
             "system_note": "",
             "need_web": False,
+            "emotion": "neutral",
+            "emotion_intensity": 1,
+            "action_tendency": "unknown",
             "direct_response": dt_ctx,
         }
 
@@ -404,6 +464,9 @@ async def route_and_execute_tools(
                 "market_ctx": "",
                 "system_note": "",
                 "need_web": False,
+                "emotion": "neutral",
+                "emotion_intensity": 1,
+                "action_tendency": "unknown",
                 "direct_response": (
                     "能再说具体一点吗？\n"
                     "比如：\n"
@@ -423,6 +486,9 @@ async def route_and_execute_tools(
             "market_ctx": "",
             "system_note": "",
             "need_web": False,
+            "emotion": "neutral",
+            "emotion_intensity": 1,
+            "action_tendency": "unknown",
         }
 
     # ── REALTIME / DECISION / RESEARCH: search + market ──
@@ -489,17 +555,35 @@ async def route_and_execute_tools(
     logger.info(f"Raw Search Result: {search_ctx if search_ctx else '(EMPTY)'}")
     logger.info(f"Search Result Length: {len(search_ctx) if search_ctx else 0}")
 
+    # Build emotion context for system prompt
+    emotion = intent.get("emotion", "neutral")
+    emotion_intensity = intent.get("emotion_intensity", 1)
+    action_tendency = intent.get("action_tendency", "unknown")
+
+    # Safety guardrail for extreme emotions (intensity ≥ 4)
+    safety_note = ""
+    if emotion_intensity >= 4:
+        safety_note = (
+            f"⚠️ 安全护栏触发：用户情绪强度 {emotion_intensity}/5（{emotion}），倾向 {action_tendency}。"
+            "先安抚情绪、降温。不要支持冲动操作。给出客观数据，帮用户理性决策。"
+            "如果用户表现出极端操作倾向，强制建议暂停操作，先观察关键指标。"
+        )
+
     return {
         "category": category.lower(),
         "search_ctx": search_ctx,
         "market_ctx": market_ctx,
         "system_note": (
-            "" if search_ctx
-            else "Tavily搜索未返回额外数据，但下方的【实时行情数据】是真实的，请使用其中的数字回答。"
-            if market_ctx
-            else "搜索和行情数据均为空。请使用'数据不足时的回复模板'中「行情和搜索都为空」的那条消息回复用户。"
+            (safety_note + "\n" if safety_note else "")
+            + ("" if search_ctx
+               else "Tavily搜索未返回额外数据，但下方的【实时行情数据】是真实的，请使用其中的数字回答。"
+               if market_ctx
+               else "搜索和行情数据均为空。请使用'数据不足时的回复模板'中「行情和搜索都为空」的那条消息回复用户。")
         ),
         "need_web": need_web,
+        "emotion": emotion,
+        "emotion_intensity": emotion_intensity,
+        "action_tendency": action_tendency,
     }
 
 
@@ -1043,11 +1127,15 @@ async def chat(
     )
 
     # Log context summary
+    emotion = tools.get("emotion", "neutral")
+    emotion_intensity = tools.get("emotion_intensity", 1)
+    action_tendency = tools.get("action_tendency", "unknown")
     context_summary = []
     if search_ctx:
         context_summary.append(f"search({len(search_ctx)} chars)")
     if market_ctx:
         context_summary.append(f"market({len(market_ctx)} chars)")
+    context_summary.append(f"emotion={emotion}({emotion_intensity})→{action_tendency}")
     if system_note:
         context_summary.append(f"note({system_note[:50]})")
     context_summary.append(f"datetime({len(datetime_ctx)} chars)")
