@@ -142,8 +142,6 @@ async def wechat_callback(request: Request):
         # Phase 2: AI后台异步处理
         _req_metrics["post_ai_triggered"] += 1
         logger.info(f"启动AI后台处理: {content[:50]}")
-        thinking = "正在查询，请稍候..."
-
         task = asyncio.create_task(
             _ai_reply_async(from_user, content)
         )
@@ -152,7 +150,7 @@ async def wechat_callback(request: Request):
         _bg_tasks.add(task)
 
         return PlainTextResponse(
-            build_text_reply(from_user, to_user, thinking),
+            build_text_reply(from_user, to_user, ""),
             media_type="application/xml",
         )
 
