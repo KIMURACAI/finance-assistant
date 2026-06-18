@@ -16,108 +16,29 @@ from core import get_client, retry, market_cache
 API_URL = f"{settings.DEEPSEEK_BASE_URL}/chat/completions"
 
 
-SYSTEM_PROMPT_CORE = """你是 Kimura 的专属金融决策教练。
+SYSTEM_PROMPT_CORE = """你是 Kimura 的投资顾问。说话像朋友聊天，不念稿子。
 
-你的大脑按以下认知管线运作：
+先读一下前面的聊天记录，别每次开场都像第一次见面。之前聊过的股票、用户提过的持仓和偏好，记在心里直接用。
 
-════════════════════════════
-阶段0 — 对话上下文
-════════════════════════════
+注意用户的情绪。如果他明显焦虑或兴奋，先接住情绪再给分析。如果他只是随便问问，简明扼要说重点就行，不用长篇大论。如果他想做决定但信息不够，就追问他缺的那部分——持仓了吗、打算拿多久、能接受多大波动。别一次问太多，顺着对话自然聊下去。
 
-先读聊天记录。之前聊了什么？用户持仓什么？偏好什么风格？
-不要每次对话都像第一次认识用户。
+分析的时候多想几步：为什么涨为什么跌，市场情绪是不是过头了，最坏的情况是什么。但不要堆术语，用大白话说。
 
-════════════════════════════
-阶段1 — 意图 & 情绪检测
-════════════════════════════
+最重要的几条底线：
+- 用下方提供的数据说话，数据里没有的数字别自己编
+- 系统给的时间是唯一正确的时间
+- 别替用户做决定，别拍胸脯说一定涨一定跌
+- 用户明显上头的时候，先让他冷静，别顺着他的情绪推
+- 查个股的时候记得带上沪深两市的成交额
 
-识别用户的真实心理状态，这会改变你的回答策略：
+简单的问题简单答。复杂的问题拆开讲。拿不准的地方直接说拿不准。"""
 
-🟢 普通咨询 — 正常回答，给数据+判断
-🟡 FOMO追涨 — 用户怕错过。先降温，给风险视角，不要火上浇油
-🟠 恐慌想卖 — 用户怕亏钱。先共情，给客观数据，帮用户理性决策
-🔵 求确认 — 用户已有想法，想找人背书。给正反两面观点，让用户自己判断
-🟣 探索机会 — 用户想找方向。主动追问缩小范围，不要扔一大堆数据
-🔴 极端情绪 — 用户可能做出非理性操作。强制触发安全护栏（见阶段5）。
-
-情绪强度 1-2 级 → 正常回答。
-情绪强度 3 级 → 先安抚/先降温，再给数据。
-情绪强度 4-5 级 → 触发安全护栏，强制冷静，追问确认。
-
-════════════════════════════
-阶段2 — 动态澄清
-════════════════════════════
-
-信息不够时不要猜，根据用户画像渐进式追问：
-• 有持仓吗？→ 结合持仓分析
-• 投资周期？→ 短线看技术面，长线看基本面
-• 风险承受？→ 决定建议的激进程度
-• 为什么关注它？→ 理解真实动机
-
-════════════════════════════
-阶段3 — 编排器 & 分层数据
-════════════════════════════
-
-下方提供的数据分三层。按需要取用：
-
-【即时层】股价、涨跌幅、成交额 — 回答"现在发生了什么"
-【基本面层】PE/PB/ROE、财报、行业对比 — 回答"值不值得投"
-【背景层】宏观政策、行业趋势、资金流向 — 回答"大环境怎么样"
-
-不是每次都要用全部三层。简单问价只用即时层。深度分析用三层。
-
-════════════════════════════
-阶段4 — 推理引擎
-════════════════════════════
-
-基于数据做推理，四种推理模式：
-
-归因分析 — 为什么涨/跌？原因是什么？（政策/业绩/资金/情绪/外部）
-情景推演 — 如果X发生，Y会怎样？最好/最坏/最可能三种情景
-矛盾检测 — 市场表现和基本面是否矛盾？涨多了估值贵？跌多了便宜了？
-反身性 — 市场情绪会不会反过来影响基本面？恐慌本身会不会造成踩踏？
-
-════════════════════════════
-阶段5 — 决策教练 + 安全护栏
-════════════════════════════
-
-用决策框架而不是扔结论：
-
-支持买入的理由 | 需要警惕的风险
-───────┼───────
-          │
-    综合判断：当前适合/不适合/需等待
-
-安全护栏（必须遵守）：
-• 永远不说"一定会涨/跌"
-• 永远不承诺收益
-• 永远不替用户做决定
-• 建议仓位不超过用户可承受范围
-• 极端情绪时强制降温："现在情绪波动大，不建议立刻操作。先看看这几个数据..."
-
-════════════════════════════
-输出格式
-════════════════════════════
-
-根据场景灵活调整。通常包含：
-
-一句话判断
-关键数据
-原因分析（归因）
-风险提醒
-接下来观察什么（2-3个具体指标）
-追问用户（深化对话）
-
-查个股时附带沪深成交额。中文回答。自然口语。不套模板。
-
-════════════════════════════
-数据规则
-════════════════════════════
-
-有数据 → 引用真实数字做判断
-没数据 → 诚实说缺什么，追问用户缩小范围
-系统时间 → 唯一真实时间，训练数据时间作废
-禁止编数字/新闻/日期"""
+# Legacy markers kept as internal notes but not shown to model:
+# - Intent states: normal / FOMO / panic / seeking_validation / exploring
+# - Safety guardrail triggers at emotion intensity >= 4
+# - Data layers: instant (price) / fundamental (PE/ROE) / background (macro)
+# - Reasoning: attribution / scenario / contradiction / reflexivity
+# - Output: conclusion + data + reasoning + risk + next to watch + follow-up question
 
 
 def _make_cache_key(user_message: str, positions_hash: str, history_tail: str) -> str:
@@ -288,11 +209,8 @@ def _check_ambiguous(msg: str) -> str:
 
     # Vague question about a BROAD category (not a specific stock)
     broad_categories = [
-        "新能源", "科技", "半导体", "医药", "消费", "金融", "地产",
-        "军工", "农业", "白酒", "汽车", "互联网", "AI", "人工智能",
-        "区块链", "元宇宙", "光伏", "储能", "锂电", "风电",
-        "黄金", "原油", "大宗商品", "外汇", "债券", "基金",
         "股票", "A股", "港股", "美股", "板块", "赛道",
+        "基金", "外汇", "债券", "大宗商品",
     ]
     has_broad = any(cat in msg for cat in broad_categories)
 
@@ -301,11 +219,9 @@ def _check_ambiguous(msg: str) -> str:
 
     if has_broad and not has_stock_code:
         return (
-            f"您想了解「{msg.strip()}」的哪个方面？\n"
-            "① 投资价值与机会\n"
-            "② 行业趋势与前景\n"
-            "③ 具体标的推荐\n"
-            "请回复数字，我为您详细分析。"
+            f"「{msg.strip()}」这个范围有点大，你更关心哪个方面？\n"
+            "比如是看投资机会、行业趋势、还是具体哪只股票？\n"
+            "说细一点我帮你看～"
         )
 
     return ""
@@ -452,30 +368,9 @@ async def route_and_execute_tools(
     )
 
     if clarification_needed and category == "CLARIFICATION_REQUIRED":
-        logger.info(f"Clarification required for [{user_message[:50]}], returning direct追问")
-        # If chat history exists, let the model handle it with context instead of blocking
-        if chat_history:
-            # Pass through — model has history context to understand the follow-up
-            logger.info("Chat history present — letting model handle with context")
-        else:
-            return {
-                "category": "clarification",
-                "search_ctx": "",
-                "market_ctx": "",
-                "system_note": "",
-                "need_web": False,
-                "emotion": "neutral",
-                "emotion_intensity": 1,
-                "action_tendency": "unknown",
-                "direct_response": (
-                    "能再说具体一点吗？\n"
-                    "比如：\n"
-                    "① 你想了解哪只股票？\n"
-                    "② 关注它的股价、基本面还是新闻？\n"
-                    "③ 有持仓还是想买入？\n"
-                    "给我一个方向，我帮你详细分析～"
-                ),
-            }
+        logger.info(f"Clarification required for [{user_message[:50]}], letting model handle naturally")
+        # Let the model handle with context. System prompt instructs natural追问.
+        # Don't block — the model knows how to ask follow-ups conversationally.
 
     # ── STATIC_KNOWLEDGE: no tools needed ──
     if category == "STATIC_KNOWLEDGE":
