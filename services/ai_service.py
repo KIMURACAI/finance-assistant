@@ -295,6 +295,21 @@ async def route_and_execute_tools(
         f"web={need_web} clarify={clarification_needed} conf={confidence}"
     )
 
+    # Feedback loop: detect corrections, force fresh search with original topic
+    _correction_signals = [
+        "不对", "错了", "不是这个", "我要的是", "你再看看", "重新查",
+        "重新搜", "再查", "换一个", "不对吧", "搞错了", "不是这样",
+    ]
+    _is_correction = any(s in user_message for s in _correction_signals)
+    _enhanced_correction = None
+    if _is_correction and chat_history:
+        need_web = True
+        for h in reversed(chat_history):
+            if h.get("role") == "user" and h.get("content"):
+                _enhanced_correction = f"{h['content']} {user_message}"
+                logger.info(f"Feedback loop: correction='{user_message[:30]}' original='{h['content'][:30]}'")
+                break
+
     if clarification_needed and category == "CLARIFICATION_REQUIRED":
         logger.info(f"Clarification required for [{user_message[:50]}], returning direct追问")
         # If chat history exists, let the model handle it with context instead of blocking
@@ -340,7 +355,10 @@ async def route_and_execute_tools(
     from datetime import datetime, timezone, timedelta
     tz_cn = timezone(timedelta(hours=8))
     today_str = datetime.now(tz_cn).strftime("%Y年%m月%d日")
-    enhanced_query = f"{user_message} {today_str}"
+    if _is_correction and _enhanced_correction:
+        enhanced_query = f"{_enhanced_correction} {today_str}"
+    else:
+        enhanced_query = f"{user_message} {today_str}"
     logger.info(f"Search Query: {enhanced_query}")
 
     # Detect Chinese-market queries — restrict to Chinese finance domains
@@ -417,10 +435,11 @@ async def route_and_execute_tools(
         "market_ctx": market_ctx,
         "system_note": (
             (safety_note + "\n" if safety_note else "")
+            + ("用户正在纠正你之前的回答。先简短致歉，然后用新数据重新回答。" if _is_correction else "")
             + ("" if search_ctx
                else "Tavily搜索未返回额外数据，但下方的【实时行情数据】是真实的，请使用其中的数字回答。"
                if market_ctx
-               else "搜索和行情数据均为空。请使用'数据不足时的回复模板'中「行情和搜索都为空」的那条消息回复用户。")
+               else "搜索和行情数据均为空。")
         ),
         "need_web": need_web,
         "emotion": emotion,
