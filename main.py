@@ -342,6 +342,32 @@ async def debug_echo(msg: str = "上证指数现在多少点"):
         }
 
 
+@app.get("/debug/raw-context")
+async def debug_raw_context(msg: str = "603583股价"):
+    """Show the raw market + search context sent to LLM for a query."""
+    import time as _time
+    import re
+    from services.ai_service import route_and_execute_tools
+
+    t0 = _time.time()
+    codes = []
+    for m in re.finditer(r'(?<![a-zA-Z0-9])(sh|sz)?(\d{6})(?![a-zA-Z0-9])', msg, re.IGNORECASE):
+        codes.append(m.group(2))
+    tools = await route_and_execute_tools(msg, [])
+    return {
+        "query": msg,
+        "extracted_codes": codes,
+        "category": tools.get("category"),
+        "search_ctx_len": len(tools.get("search_ctx", "")),
+        "search_ctx": tools.get("search_ctx", "")[:2000],
+        "market_ctx_len": len(tools.get("market_ctx", "")),
+        "market_ctx": tools.get("market_ctx", "")[:2000],
+        "system_note": tools.get("system_note", ""),
+        "need_web": tools.get("need_web"),
+        "time": round(_time.time() - t0, 2),
+    }
+
+
 @app.get("/debug/metrics")
 async def debug_metrics():
     """View request metrics for debugging."""
