@@ -480,7 +480,12 @@ async def route_and_execute_tools(
         "category": category.lower(),
         "search_ctx": search_ctx,
         "market_ctx": market_ctx,
-        "system_note": "" if search_ctx else "搜索未获取到实时数据，可用市场数据或知识回答，不编造具体数字。",
+        "system_note": (
+            "" if search_ctx
+            else "Tavily搜索未返回额外数据，但下方的【实时行情数据】是真实的，请使用其中的数字回答。"
+            if market_ctx
+            else "搜索和行情数据均未获取到，无法回答实时问题。"
+        ),
         "need_web": need_web,
     }
 
