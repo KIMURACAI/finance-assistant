@@ -683,22 +683,21 @@ def _validate_hard(
     response_text: str,
     search_ctx: str,
     market_ctx: str,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     """Hard anti-hallucination validator.
 
-    Extracts all numbers from the model response.
-    Checks every number against the combined search + market context.
-    If ANY unverified number is found → BLOCK the response.
+    Checks numbers against market data. Auto-corrects hallucinated stock prices.
+    General numbers that can't be verified are still blocked.
 
-    Returns: (passed: bool, reason: str)
+    Returns: (passed: bool, reason: str, corrected_text: str)
     """
     if not response_text or not response_text.strip():
-        return False, "empty response"
+        return False, "empty response", response_text
 
     # No search/market context → nothing to validate against
     combined_source = (search_ctx or "") + "\n" + (market_ctx or "")
     if not combined_source.strip():
-        return True, "no source to validate against"
+        return True, "no source to validate against", response_text
 
     # ═══ Stock-price-specific validation ═══
     # Extract stock prices from market context: "贵州茅台(600519): 最新价 1215.00  涨跌 -2.02%"
@@ -714,36 +713,48 @@ def _validate_hard(
         except ValueError:
             pass
 
-    # Check response for known stock codes/names with hallucinated prices
+    # Check for stock price hallucinations and auto-correct
+    corrections: dict[str, tuple[float, float]] = {}  # old_value → (old, new)
     for key, real_price in list(market_prices.items()):
-        # Match full key or partial (e.g. "茅台" should match "贵州茅台")
         matched = key in response_text
+        search_key = key
         if not matched and len(key) > 2:
-            # Try partial: last 2+ chars of the key (e.g. "茅台" from "贵州茅台")
             for shorten in [key[-2:], key[-3:]]:
                 if len(shorten) >= 2 and shorten in response_text:
                     matched = True
-                    key = shorten  # use the shortened version for finding nearby price
+                    search_key = shorten
                     break
         if not matched:
             continue
-        idx = response_text.find(key)
+        idx = response_text.find(search_key)
         if idx < 0:
             continue
-        nearby = response_text[idx + len(key):idx + len(key) + 25]
+        nearby = response_text[idx + len(search_key):idx + len(search_key) + 25]
         for m in re.finditer(r'([\d.]+)', nearby):
             try:
                 rp = float(m.group(1))
                 if 1 < rp < 10000:
                     pct_off = abs(rp - real_price) / real_price
-                    if pct_off > 0.05:
-                        logger.error(
-                            f"PRICE HALLUCINATION: {key} real={real_price} model={rp} ({pct_off*100:.0f}% off)"
+                    if pct_off > 0.03:  # >3% off = hallucination
+                        old_str = m.group(1)
+                        new_str = f"{real_price:.2f}".rstrip('0').rstrip('.')
+                        corrections[old_str] = (rp, real_price)
+                        logger.warning(
+                            f"PRICE CORRECTED: {search_key} {old_str}→{new_str} (was {pct_off*100:.0f}% off)"
                         )
-                        return False, f"wrong price {rp} for {key}, real={real_price}"
                     break
             except ValueError:
                 pass
+
+    # Apply corrections to response text
+    if corrections:
+        corrected = response_text
+        for old_str, (wrong, right) in corrections.items():
+            new_str = f"{right:.2f}".rstrip('0').rstrip('.')
+            corrected = corrected.replace(old_str, new_str, 1)
+        logger.info(f"Auto-corrected {len(corrections)} hallucinated prices in response")
+    else:
+        corrected = response_text
 
     # ═══ General number extraction ═══
     response_nums = _extract_numbers(response_text)
@@ -789,9 +800,9 @@ def _validate_hard(
                 f"VALIDATION FAILED: unverified numbers={sorted(still_suspicious)[:20]} "
                 f"response_nums={len(response_nums)} source_nums={len(source_nums)}"
             )
-            return False, f"unverified numbers: {still_suspicious[:10]}"
+            return False, f"unverified numbers: {still_suspicious[:10]}", corrected
 
-    return True, "ok"
+    return True, "ok", corrected
 
 
 def _verify_and_parse(
@@ -1140,7 +1151,7 @@ async def chat(
     # Additionally validate against search_ctx when it's the only data source.
     _skip_validation = category in ("clarification", "static_knowledge", "datetime")
     if not _skip_validation and (search_ctx or market_ctx):
-        passed, reason = _validate_hard(raw_content, search_ctx, market_ctx)
+        passed, reason, raw_content = _validate_hard(raw_content, search_ctx, market_ctx)
         if not passed:
             logger.error(f"VALIDATION FAILED: {reason}")
             logger.info("Final Response: External search completed but verification failed. No reliable answer generated.")
